@@ -10,7 +10,7 @@ Bare-metal, single loop on core 0. No RTOS.
 |---|---|
 | `src/config.h` | All tunables: pins, ODR, full scale, filters, USB IDs, LED. Edit here first. |
 | `src/main.c` | Init, then the main loop. Owns no hardware directly. |
-| `src/imu.[ch]` | Public IMU API, chip-neutral config enums, SPI bus, WHO_AM_I probe, soft reset, sample/timestamp reads. |
+| `src/imu.[ch]` | Public IMU API, chip-neutral config enums, SPI bus, WHO_AM_I probe, soft reset, INT1 IRQ + DMA sample reads, sample queue. |
 | `src/imu_bus.h` | Private: bus callbacks for the ST drivers, per-chip configure functions. |
 | `src/imu_lsm6ds3.c` | LSM6DS3 configuration via `lsm6ds3-pid`. |
 | `src/imu_lsm6ds3trc.c` | LSM6DS3TR-C configuration via `lsm6ds3tr-c-pid`. |
@@ -44,10 +44,20 @@ configured for mode 3, then pins muxed so SCK starts idle high with CS deasserte
 1. Before USB starts, `imu_init()` reads WHO_AM_I: 0x69 is LSM6DS3, 0x6A is LSM6DS3TR-C, anything
    else is "no sensor". It soft-resets (CTRL3_C SW_RESET, same on both), then the chip file
    disables I2C, enables BDU and auto-increment, applies full scale and filters, routes accel/gyro
-   data-ready to INT1, enables and zeroes the 25 us timestamp counter, and sets ODR last.
-   Output and timestamp registers are at the same addresses on both chips, so reads are shared.
-2. Main loop polls INT1 level. When high, one 12-byte burst reads gyro XYZ then accel XYZ,
-   followed by the 24-bit timestamp (read twice to reject a carry between bytes).
+   data-ready to INT1, enables the timestamp counter, sets ODR, then zeroes the counter
+   (the `AAh` reset is ignored until the sensor is running). Output and timestamp registers are
+   at the same addresses on both chips, so reads are shared. Init uses blocking SPI; afterwards
+   only the IRQ/DMA path touches SPI, and re-init disables it first.
+2. Sample read, no CPU busy-wait:
+   - INT1 level-high IRQ (DRDY stays high until read; level re-fires if a sample lands mid-read,
+     an edge would stall): disables itself, drops CS, starts a TX/RX DMA pair for one burst
+     `0x22..0x42` (outputs, sensor-hub/FIFO registers with no read side effects in bypass,
+     timestamp).
+   - DMA RX-complete IRQ: raises CS, starts a 3-byte timestamp read.
+   - Second RX-complete: builds the sample, pushes it to a 32-entry `queue_t`. If the raw
+     counter has passed 0x800000, a third DMA write resets it (`AAh` to TIMESTAMP2). Then
+     INT1 is re-enabled.
+   - Main loop drains the queue and keeps the newest sample.
 3. When the HID endpoint is free, the latest sample is sent. Interrupt IN endpoint, `bInterval` 1 ms
    (1000 Hz, the full-speed maximum).
 4. If the IMU is missing, init is retried every second; USB stays up so picotool still works.
@@ -74,8 +84,17 @@ The Sensor page usage appears only as a field, never as a collection, so `hid-co
 group the device as a sensor hub.
 
 Report is 17 bytes, little endian, no report ID: 6 x int16 axes, 1 button byte, uint32 timestamp.
-The timestamp is the sensor's 24-bit counter (25 us/LSB nominal, wraps every ~419 s); hosts take
-deltas modulo 2^24. It is captured when the sample is fetched, within one loop pass of data-ready.
+The timestamp is the sensor's 24-bit counter, 25 us/LSB nominal; the sensor's internal oscillator
+sets the real tick (measured ~24.5 us on one LSM6DS3 unit). It is read by DMA within microseconds
+of data-ready. Hosts take deltas modulo 2^24.
+
+Sensor counter behaviour (measured): it saturates at 0xFFFFFF rather than wrapping, the `AAh`
+reset only takes effect once an ODR is running, and its bytes are not latched, so a carry
+between the low and middle byte reads yields a value ~255 too high. Firmware handling:
+- Torn reads: the burst copy is read before the separate 3-byte read, so if it is larger it is
+  torn and the second read is used.
+- Saturation: past 0x800000 (~205 s) the counter is reset and the elapsed count folded into an
+  offset, so the reported value wraps mod 2^24 (~411 s). Each reset loses ~2 ticks.
 It arrives in the same `SYN_REPORT` frame as the axes it belongs to.
 
 The two buttons exist so the device advertises `BTN_GAMEPAD`, which the spec requires.

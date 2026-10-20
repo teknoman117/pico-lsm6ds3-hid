@@ -78,6 +78,7 @@ target_link_libraries(pico-lsm6ds3
         pico_usb_reset
         hardware_spi
         hardware_pio
+        hardware_dma
         tinyusb_device
         lsm6ds3_pid
         lsm6ds3tr_c_pid

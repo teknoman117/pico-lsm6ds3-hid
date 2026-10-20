@@ -63,8 +63,10 @@ int main(void) {
                 }
                 next_retry = make_timeout_time_ms(IMU_RETRY_MS);
             }
-        } else if (imu_data_ready()) {
-            pending = imu_read(&sample);
+        } else {
+            while (imu_pop(&sample)) {
+                pending = true;
+            }
         }
 
         if (pending && tud_mounted() && gamepad_send(&sample)) {
@@ -72,5 +74,13 @@ int main(void) {
         }
 
         status_led_set(current_status(model != IMU_MODEL_NONE));
+
+#ifndef NDEBUG
+        static uint32_t overflows_reported;
+        if (imu_overflow_count() != overflows_reported) {
+            overflows_reported = imu_overflow_count();
+            DBG("imu: %lu samples dropped\n", (unsigned long)overflows_reported);
+        }
+#endif
     }
 }

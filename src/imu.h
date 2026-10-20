@@ -70,15 +70,16 @@ typedef struct {
     uint32_t timestamp; // sensor timer, 24-bit, IMU_TIMESTAMP_US_PER_LSB, wraps
 } imu_sample_t;
 
-// Sets up SPI/GPIO, identifies the chip by WHO_AM_I and applies config.h.
-// Returns IMU_MODEL_NONE on failure. Safe to call again.
+// Sets up SPI/GPIO, identifies the chip by WHO_AM_I, applies config.h and starts the
+// INT1 IRQ. Returns IMU_MODEL_NONE on failure. Safe to call again.
 imu_model_t imu_init(void);
 
 const char *imu_model_name(imu_model_t model);
 
-// INT1 level; high while unread samples are pending.
-bool imu_data_ready(void);
+// Samples are read in the INT1 (data-ready) IRQ and queued. Returns false when empty.
+bool imu_pop(imu_sample_t *out);
 
-bool imu_read(imu_sample_t *out);
+// Samples dropped because the queue was full.
+uint32_t imu_overflow_count(void);
 
 #endif

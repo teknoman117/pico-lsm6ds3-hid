@@ -84,9 +84,9 @@ bool imu_lsm6ds3_configure(void) {
 
     err |= lsm6ds3_timestamp_res_set(&ctx, LSM6DS3_LSB_25us);
     err |= lsm6ds3_timestamp_set(&ctx, PROPERTY_ENABLE);
-    err |= lsm6ds3_timestamp_rst_set(&ctx);
 
     err |= lsm6ds3_xl_data_rate_set(&ctx, (lsm6ds3_odr_xl_t)IMU_XL_ODR);
     err |= lsm6ds3_gy_data_rate_set(&ctx, (lsm6ds3_odr_g_t)gy_odr);
+    err |= lsm6ds3_timestamp_rst_set(&ctx);
     return err == 0;
 }

@@ -63,7 +63,7 @@ As a gamepad (evdev / SDL / joystick APIs):
 | `ABS_X`, `ABS_Y`, `ABS_Z` | accel X, Y, Z |
 | `ABS_RX`, `ABS_RY`, `ABS_RZ` | gyro X, Y, Z |
 | `BTN_SOUTH`, `BTN_EAST` | always released (spec requirement) |
-| `ABS_MISC` | sensor timestamp, 24-bit, 25 µs/LSB |
+| `ABS_MISC` | sensor timestamp, 24-bit, ~25 µs/LSB |
 
 ```sh
 evtest   # pick "LSM6DS3" or "LSM6DS3TR-C"
@@ -80,10 +80,12 @@ Raw reports are also available on `/dev/hidrawN`: 17 bytes, little endian, no re
 | 0 | int16 ×3 | accel X, Y, Z |
 | 6 | int16 ×3 | gyro X, Y, Z |
 | 12 | uint8 | buttons |
-| 13 | uint32 | timestamp, 24-bit, 25 µs/LSB |
+| 13 | uint32 | timestamp, 24-bit, ~25 µs/LSB |
 
-The timestamp comes from the sensor's internal timer (same format on both chips) and wraps every ~419 s; compute
-`dt = ((t - t_prev) & 0xFFFFFF) * 25e-6`.
+The timestamp comes from the sensor's internal timer (same format on both chips) and wraps
+modulo 2^24; compute `dt = ((t - t_prev) & 0xFFFFFF) * tick`. The tick is 25 µs nominal but
+follows the sensor's internal oscillator (one LSM6DS3 measured ~24.5 µs, ~2% fast), so for
+accurate absolute time estimate `tick` against the host clock.
 
 Scale (LSB → unit), identical on both chips:
 
@@ -97,12 +99,13 @@ Scale (LSB → unit), identical on both chips:
 
 ```python
 import struct
+TICK = 25e-6  # nominal; calibrate against the host clock for absolute accuracy
 with open("/dev/hidraw0", "rb", buffering=0) as f:
     prev = None
     while True:
         ax, ay, az, gx, gy, gz, btn, ts = struct.unpack("<6hBI", f.read(17))
         if prev is not None:
-            dt = ((ts - prev) & 0xFFFFFF) * 25e-6
+            dt = ((ts - prev) & 0xFFFFFF) * TICK
         prev = ts
 ```
 

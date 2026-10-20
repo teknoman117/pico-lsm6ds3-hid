@@ -61,10 +61,10 @@ bool imu_lsm6ds3trc_configure(void) {
 
     err |= lsm6ds3tr_c_timestamp_res_set(&ctx, LSM6DS3TR_C_LSB_25us);
     err |= lsm6ds3tr_c_timestamp_set(&ctx, PROPERTY_ENABLE);
-    uint8_t rst = TIMESTAMP_RESET;
-    err |= lsm6ds3tr_c_write_reg(&ctx, LSM6DS3TR_C_TIMESTAMP2_REG, &rst, 1);
 
     err |= lsm6ds3tr_c_xl_data_rate_set(&ctx, (lsm6ds3tr_c_odr_xl_t)IMU_XL_ODR);
     err |= lsm6ds3tr_c_gy_data_rate_set(&ctx, (lsm6ds3tr_c_odr_g_t)IMU_GY_ODR);
+    uint8_t rst = TIMESTAMP_RESET;
+    err |= lsm6ds3tr_c_write_reg(&ctx, LSM6DS3TR_C_TIMESTAMP2_REG, &rst, 1);
     return err == 0;
 }
