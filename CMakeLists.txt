@@ -36,9 +36,14 @@ pico_sdk_init()
 add_library(lsm6ds3_pid STATIC lib/lsm6ds3-pid/lsm6ds3_reg.c)
 target_include_directories(lsm6ds3_pid PUBLIC lib/lsm6ds3-pid)
 
+add_library(lsm6ds3tr_c_pid STATIC lib/lsm6ds3tr-c-pid/lsm6ds3tr-c_reg.c)
+target_include_directories(lsm6ds3tr_c_pid PUBLIC lib/lsm6ds3tr-c-pid)
+
 add_executable(pico-lsm6ds3
         src/main.c
         src/imu.c
+        src/imu_lsm6ds3.c
+        src/imu_lsm6ds3trc.c
         src/gamepad.c
         src/usb_descriptors.c
         src/status_led.c
@@ -75,6 +80,7 @@ target_link_libraries(pico-lsm6ds3
         hardware_pio
         tinyusb_device
         lsm6ds3_pid
+        lsm6ds3tr_c_pid
         )
 
 pico_add_extra_outputs(pico-lsm6ds3)

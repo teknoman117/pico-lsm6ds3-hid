@@ -13,32 +13,48 @@
 #define PIN_IMU_INT1     20
 #define PIN_NEOPIXEL     23
 
-// Output data rates (accel up to 6.66 kHz, gyro up to 1.66 kHz)
-#define IMU_XL_ODR       LSM6DS3_XL_ODR_1k66Hz
-#define IMU_GY_ODR       LSM6DS3_GY_ODR_1k66Hz
+// --- Both sensors (imu.h enums) ---
+
+// Output data rates. Accel up to 6.66 kHz; gyro up to 1.66 kHz on LSM6DS3 (clamped),
+// 6.66 kHz on LSM6DS3TR-C.
+#define IMU_XL_ODR       IMU_ODR_1K66HZ
+#define IMU_GY_ODR       IMU_ODR_1K66HZ
 
 // Full scale
-#define IMU_XL_FS        LSM6DS3_4g
-#define IMU_GY_FS        LSM6DS3_2000dps
-
-// Accel analog anti-aliasing: IMU_XL_AA_AUTO picks bandwidth from ODR,
-// otherwise use a lsm6ds3_bw_xl_t value.
-#define IMU_XL_AA_BW     IMU_XL_AA_AUTO
+#define IMU_XL_FS        IMU_XL_FS_4G
+#define IMU_GY_FS        IMU_GY_FS_2000DPS
 
 // Accel digital filter: IMU_XL_FILTER_NONE, _LPF2 or _HPF.
 #define IMU_XL_FILTER    IMU_XL_FILTER_LPF2
-#define IMU_XL_LPF2_BW   LSM6DS3_XL_LP_ODR_DIV_50  // used with _LPF2
-#define IMU_XL_HPF_BW    LSM6DS3_XL_HP_ODR_DIV_100 // used with _HPF
+#define IMU_XL_LPF2_BW   IMU_XL_LPF2_ODR_DIV_50 // used with _LPF2
+#define IMU_XL_HPF_BW    IMU_XL_HPF_ODR_DIV_100 // used with _HPF
+
+// --- LSM6DS3 only (lsm6ds3_reg.h enums) ---
+
+// Accel analog anti-aliasing: 0 picks bandwidth from ODR, 1 uses IMU_DS3_XL_AA_BW.
+#define IMU_DS3_XL_AA_MANUAL 0
+#define IMU_DS3_XL_AA_BW     LSM6DS3_ANTI_ALIASING_400Hz
 
 // Gyro high-pass filter
-#define IMU_GY_HPF_EN    0
-#define IMU_GY_HPF_BW    LSM6DS3_HP_CUT_OFF_32mHz4
+#define IMU_DS3_GY_HPF_EN    0
+#define IMU_DS3_GY_HPF_BW    LSM6DS3_HP_CUT_OFF_32mHz4
+
+// --- LSM6DS3TR-C only (lsm6ds3tr-c_reg.h enums) ---
+
+// Accel analog bandwidth: LSM6DS3TR_C_XL_ANA_BW_1k5Hz or _400Hz.
+#define IMU_TRC_XL_ANALOG_BW      LSM6DS3TR_C_XL_ANA_BW_1k5Hz
+// LPF2 input: 0 low latency, 1 low noise.
+#define IMU_TRC_XL_LPF2_LOW_NOISE 0
+// Gyro HPF/LPF1 chain, a lsm6ds3tr_c_lpf1_sel_g_t value. LP2_ONLY = both off.
+#define IMU_TRC_GY_FILTER         LSM6DS3TR_C_LP2_ONLY
 
 // USB. Raspberry Pi stdio VID/PID so picotool finds the reset interface.
-#define USB_VID          0x2E8A
-#define USB_PID          0x000A
-#define USB_PRODUCT      "LSM6DS3"
-#define USB_HID_POLL_MS  1
+// Product string is the detected sensor name; USB_PRODUCT_DEFAULT until one is found.
+#define USB_VID             0x2E8A
+#define USB_PID             0x000A
+#define USB_PRODUCT_DEFAULT "LSM6DS3"
+#define USB_HID_POLL_MS     1
+#define USB_REENUM_MS       100
 
 // Status LED
 #define NEOPIXEL_RGBW       0

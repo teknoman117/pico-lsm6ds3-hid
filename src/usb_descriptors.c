@@ -5,6 +5,7 @@
 #include "pico/unique_id.h"
 #include "pico/usb_reset.h"
 #include "tusb.h"
+#include "usb_descriptors.h"
 
 enum {
     ITF_NUM_HID,
@@ -34,7 +35,7 @@ static const tusb_desc_device_t desc_device = {
     .idVendor = USB_VID,
     .idProduct = USB_PID,
     .bcdDevice = 0x0100,
-    .iManufacturer = 0, // none, so the kernel names the device just USB_PRODUCT
+    .iManufacturer = 0, // none, so the kernel names the device just the product string
     .iProduct = STR_PRODUCT,
     .iSerialNumber = STR_SERIAL,
     .bNumConfigurations = 1,
@@ -56,10 +57,18 @@ uint8_t const *tud_descriptor_configuration_cb(uint8_t index) {
     return desc_config;
 }
 
-static const char *const strings[STR_COUNT] = {
-    [STR_PRODUCT] = USB_PRODUCT,
+static const char *strings[STR_COUNT] = {
+    [STR_PRODUCT] = USB_PRODUCT_DEFAULT,
     [STR_RESET] = "Reset",
 };
+
+void usb_set_product(const char *name) {
+    strings[STR_PRODUCT] = name;
+}
+
+const char *usb_product(void) {
+    return strings[STR_PRODUCT];
+}
 
 uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
     (void)langid;

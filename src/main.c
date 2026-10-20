@@ -1,3 +1,5 @@
+#include <string.h>
+
 #include "config.h"
 #include "debug.h"
 #include "gamepad.h"
@@ -5,21 +7,9 @@
 #include "pico/stdlib.h"
 #include "status_led.h"
 #include "tusb.h"
+#include "usb_descriptors.h"
 
 #define IMU_RETRY_MS 1000
-
-static const imu_config_t imu_cfg = {
-    .xl_odr = IMU_XL_ODR,
-    .xl_fs = IMU_XL_FS,
-    .xl_aa_bw = IMU_XL_AA_BW,
-    .xl_filter = IMU_XL_FILTER,
-    .xl_lpf2_bw = IMU_XL_LPF2_BW,
-    .xl_hpf_bw = IMU_XL_HPF_BW,
-    .gy_odr = IMU_GY_ODR,
-    .gy_fs = IMU_GY_FS,
-    .gy_hpf_en = IMU_GY_HPF_EN,
-    .gy_hpf_bw = IMU_GY_HPF_BW,
-};
 
 static status_t current_status(bool imu_ok) {
     if (!imu_ok) {
@@ -31,6 +21,18 @@ static status_t current_status(bool imu_ok) {
     return tud_mounted() ? STATUS_STREAMING : STATUS_USB_WAIT;
 }
 
+// Re-enumerate if the detected sensor differs from the advertised product name.
+static void update_product_name(imu_model_t model) {
+    const char *name = imu_model_name(model);
+    if (strcmp(name, usb_product()) == 0) {
+        return;
+    }
+    usb_set_product(name);
+    tud_disconnect();
+    sleep_ms(USB_REENUM_MS);
+    tud_connect();
+}
+
 int main(void) {
 #ifndef NDEBUG
     stdio_init_all();
@@ -38,9 +40,14 @@ int main(void) {
     DBG("pico-lsm6ds3 start\n");
 
     status_led_init();
+
+    // Identify the sensor before enumeration so the product string is right first time.
+    imu_model_t model = imu_init();
+    if (model != IMU_MODEL_NONE) {
+        usb_set_product(imu_model_name(model));
+    }
     tusb_init();
 
-    bool imu_ok = imu_init(&imu_cfg);
     absolute_time_t next_retry = make_timeout_time_ms(IMU_RETRY_MS);
     imu_sample_t sample;
     bool pending = false;
@@ -48,9 +55,12 @@ int main(void) {
     while (true) {
         tud_task();
 
-        if (!imu_ok) {
+        if (model == IMU_MODEL_NONE) {
             if (time_reached(next_retry)) {
-                imu_ok = imu_init(&imu_cfg);
+                model = imu_init();
+                if (model != IMU_MODEL_NONE) {
+                    update_product_name(model);
+                }
                 next_retry = make_timeout_time_ms(IMU_RETRY_MS);
             }
         } else if (imu_data_ready()) {
@@ -61,6 +71,6 @@ int main(void) {
             pending = false;
         }
 
-        status_led_set(current_status(imu_ok));
+        status_led_set(current_status(model != IMU_MODEL_NONE));
     }
 }

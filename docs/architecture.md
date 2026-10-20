@@ -1,6 +1,7 @@
 # Architecture
 
-RP2040 firmware that streams LSM6DS3 accel/gyro data as a USB HID gamepad named `LSM6DS3`.
+RP2040 firmware that streams LSM6DS3 or LSM6DS3TR-C accel/gyro data as a USB HID gamepad named
+after the detected sensor (`LSM6DS3` or `LSM6DS3TR-C`).
 Bare-metal, single loop on core 0. No RTOS.
 
 ## Layout
@@ -9,14 +10,20 @@ Bare-metal, single loop on core 0. No RTOS.
 |---|---|
 | `src/config.h` | All tunables: pins, ODR, full scale, filters, USB IDs, LED. Edit here first. |
 | `src/main.c` | Init, then the main loop. Owns no hardware directly. |
-| `src/imu.[ch]` | LSM6DS3 setup and reads. SPI glue for the ST driver. |
+| `src/imu.[ch]` | Public IMU API, chip-neutral config enums, SPI bus, WHO_AM_I probe, soft reset, sample/timestamp reads. |
+| `src/imu_bus.h` | Private: bus callbacks for the ST drivers, per-chip configure functions. |
+| `src/imu_lsm6ds3.c` | LSM6DS3 configuration via `lsm6ds3-pid`. |
+| `src/imu_lsm6ds3trc.c` | LSM6DS3TR-C configuration via `lsm6ds3tr-c-pid`. |
 | `src/gamepad.[ch]` | HID report descriptor, report layout, HID callbacks. |
-| `src/usb_descriptors.c` | Device/config/string descriptors (HID + picotool reset interface). |
+| `src/usb_descriptors.[ch]` | Device/config/string descriptors (HID + picotool reset interface), runtime product string. |
 | `src/tusb_config.h` | TinyUSB device config. |
 | `src/status_led.[ch]`, `src/ws2812.pio` | NeoPixel status via PIO. |
 | `src/debug.h` | `DBG()` printf macro, compiled out when `NDEBUG` is defined. |
 | `tools/uhid_check.py` | Host-side check of the HID mapping via `/dev/uhid`, no hardware needed. |
-| `lib/lsm6ds3-pid/` | ST's platform-independent LSM6DS3 driver, vendored unmodified. See `UPSTREAM.md`. |
+| `lib/lsm6ds3-pid/`, `lib/lsm6ds3tr-c-pid/` | ST's platform-independent drivers, vendored unmodified. See each `UPSTREAM.md`. |
+
+The two ST headers define incompatible `stmdev_ctx_t` under the same include guard, so each is
+included only by its own chip file. Neither leaks into `imu.h` or `config.h`.
 
 ## Hardware
 
@@ -34,14 +41,17 @@ configured for mode 3, then pins muxed so SCK starts idle high with CS deasserte
 
 ## Data flow
 
-1. `imu_init()` checks WHO_AM_I (0x69), soft-resets, disables I2C, enables BDU and auto-increment,
-   applies full scale and filters, routes accel/gyro data-ready to INT1, enables and zeroes the
-   25 us timestamp counter, then sets ODR last.
+1. Before USB starts, `imu_init()` reads WHO_AM_I: 0x69 is LSM6DS3, 0x6A is LSM6DS3TR-C, anything
+   else is "no sensor". It soft-resets (CTRL3_C SW_RESET, same on both), then the chip file
+   disables I2C, enables BDU and auto-increment, applies full scale and filters, routes accel/gyro
+   data-ready to INT1, enables and zeroes the 25 us timestamp counter, and sets ODR last.
+   Output and timestamp registers are at the same addresses on both chips, so reads are shared.
 2. Main loop polls INT1 level. When high, one 12-byte burst reads gyro XYZ then accel XYZ,
    followed by the 24-bit timestamp (read twice to reject a carry between bytes).
 3. When the HID endpoint is free, the latest sample is sent. Interrupt IN endpoint, `bInterval` 1 ms
    (1000 Hz, the full-speed maximum).
 4. If the IMU is missing, init is retried every second; USB stays up so picotool still works.
+   If a later detection changes the product name, the device disconnects and re-enumerates.
 
 ## HID mapping
 
@@ -75,6 +85,8 @@ Axis range is the full int16 range, so scale follows `IMU_XL_FS` / `IMU_GY_FS`.
 
 - VID:PID `2E8A:000A` so `picotool` finds the device without `--vid/--pid`.
 - No manufacturer string, so the kernel device name is exactly the product string.
+- Product string is the detected sensor: `LSM6DS3` or `LSM6DS3TR-C`; `USB_PRODUCT_DEFAULT`
+  (`LSM6DS3`) if none was found at boot.
 - Serial number is the flash unique ID.
 - Interface 1 is the SDK `pico_usb_reset` vendor interface (`picotool reboot`, `picotool load -f`).
 
@@ -95,12 +107,19 @@ UART and USB stdio are always disabled.
 
 ## Configuring the sensor
 
-All in `src/config.h`, using the ST driver enums from `lsm6ds3_reg.h`:
+All in `src/config.h`.
 
-- `IMU_XL_ODR`, `IMU_GY_ODR`: output data rates.
+Both sensors, using the chip-neutral enums in `imu.h` (values are the shared register codes,
+checked against each ST driver with `static_assert`):
+
+- `IMU_XL_ODR`, `IMU_GY_ODR`: output data rates. LSM6DS3 gyro is clamped to 1.66 kHz.
 - `IMU_XL_FS`, `IMU_GY_FS`: full scale.
-- `IMU_XL_AA_BW`: analog anti-aliasing bandwidth, or `IMU_XL_AA_AUTO`.
 - `IMU_XL_FILTER`: `IMU_XL_FILTER_NONE`, `_LPF2` (`IMU_XL_LPF2_BW`) or `_HPF` (`IMU_XL_HPF_BW`).
-- `IMU_GY_HPF_EN`, `IMU_GY_HPF_BW`: gyro high-pass filter.
+
+LSM6DS3 only (`lsm6ds3_reg.h` enums): `IMU_DS3_XL_AA_MANUAL` / `IMU_DS3_XL_AA_BW` (analog
+anti-aliasing), `IMU_DS3_GY_HPF_EN` / `IMU_DS3_GY_HPF_BW` (gyro high-pass).
+
+LSM6DS3TR-C only (`lsm6ds3tr-c_reg.h` enums): `IMU_TRC_XL_ANALOG_BW`, `IMU_TRC_XL_LPF2_LOW_NOISE`,
+`IMU_TRC_GY_FILTER` (gyro HPF/LPF1 chain).
 
 Keep at least one ODR at or above 1 kHz to fill every HID frame.

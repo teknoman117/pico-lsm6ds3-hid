@@ -4,13 +4,24 @@
 #include "debug.h"
 #include "hardware/gpio.h"
 #include "hardware/spi.h"
+#include "imu_bus.h"
 #include "pico/time.h"
 
-#define SPI_READ_BIT   0x80
-#define BOOT_TIME_MS   20
+#define SPI_READ_BIT     0x80
+#define BOOT_TIME_MS     20
 #define RESET_TIMEOUT_MS 50
 
-static int32_t spi_write_reg(void *handle, uint8_t reg, const uint8_t *buf, uint16_t len) {
+// Registers shared by LSM6DS3 and LSM6DS3TR-C.
+#define REG_WHO_AM_I     0x0F
+#define REG_CTRL3_C      0x12
+#define CTRL3_C_SW_RESET 0x01
+#define REG_OUTX_L_G     0x22
+#define REG_TIMESTAMP0   0x40
+
+#define WHO_AM_I_LSM6DS3    0x69
+#define WHO_AM_I_LSM6DS3TRC 0x6A
+
+int32_t imu_bus_write(void *handle, uint8_t reg, const uint8_t *buf, uint16_t len) {
     (void)handle;
     uint8_t addr = reg & ~SPI_READ_BIT;
     gpio_put(PIN_IMU_CS, 0);
@@ -20,7 +31,7 @@ static int32_t spi_write_reg(void *handle, uint8_t reg, const uint8_t *buf, uint
     return 0;
 }
 
-static int32_t spi_read_reg(void *handle, uint8_t reg, uint8_t *buf, uint16_t len) {
+int32_t imu_bus_read(void *handle, uint8_t reg, uint8_t *buf, uint16_t len) {
     (void)handle;
     uint8_t addr = reg | SPI_READ_BIT;
     gpio_put(PIN_IMU_CS, 0);
@@ -30,16 +41,9 @@ static int32_t spi_read_reg(void *handle, uint8_t reg, uint8_t *buf, uint16_t le
     return 0;
 }
 
-static void delay_ms(uint32_t ms) {
+void imu_bus_delay_ms(uint32_t ms) {
     sleep_ms(ms);
 }
-
-static const stmdev_ctx_t ctx = {
-    .write_reg = spi_write_reg,
-    .read_reg = spi_read_reg,
-    .mdelay = delay_ms,
-    .handle = NULL,
-};
 
 // Once only: re-running spi_init() resets the block while pins are muxed and glitches SCK.
 static void bus_init(void) {
@@ -68,106 +72,74 @@ static void bus_init(void) {
     sleep_ms(BOOT_TIME_MS);
 }
 
-static int32_t soft_reset(void) {
-    int32_t err = lsm6ds3_reset_set(&ctx, PROPERTY_ENABLE);
-    absolute_time_t deadline = make_timeout_time_ms(RESET_TIMEOUT_MS);
-    uint8_t busy = 1;
-    while (!err && busy) {
-        if (time_reached(deadline)) {
-            return -1;
-        }
-        err = lsm6ds3_reset_get(&ctx, &busy);
-    }
-    return err;
-}
-
-static int32_t config_xl_filters(const imu_config_t *cfg) {
-    int32_t err = 0;
-
-    if (cfg->xl_aa_bw != IMU_XL_AA_AUTO) {
-        lsm6ds3_ctrl4_c_t ctrl4;
-        err |= lsm6ds3_read_reg(&ctx, LSM6DS3_CTRL4_C, (uint8_t *)&ctrl4, 1);
-        ctrl4.xl_bw_scal_odr = 1;
-        err |= lsm6ds3_write_reg(&ctx, LSM6DS3_CTRL4_C, (uint8_t *)&ctrl4, 1);
-        err |= lsm6ds3_xl_filter_analog_set(&ctx, (lsm6ds3_bw_xl_t)cfg->xl_aa_bw);
-    }
-
-    switch (cfg->xl_filter) {
-    case IMU_XL_FILTER_LPF2:
-        err |= lsm6ds3_xl_lp2_bandwidth_set(&ctx, cfg->xl_lpf2_bw);
-        break;
-    case IMU_XL_FILTER_HPF:
-        err |= lsm6ds3_xl_hp_bandwidth_set(&ctx, cfg->xl_hpf_bw);
-        break;
-    case IMU_XL_FILTER_NONE:
-        break;
-    }
-    return err;
-}
-
-static int32_t config_gy_filters(const imu_config_t *cfg) {
-    if (!cfg->gy_hpf_en) {
-        return 0;
-    }
-    int32_t err = lsm6ds3_gy_hp_bandwidth_set(&ctx, cfg->gy_hpf_bw);
-    lsm6ds3_ctrl7_g_t ctrl7;
-    err |= lsm6ds3_read_reg(&ctx, LSM6DS3_CTRL7_G, (uint8_t *)&ctrl7, 1);
-    ctrl7.hp_g_en = 1;
-    err |= lsm6ds3_write_reg(&ctx, LSM6DS3_CTRL7_G, (uint8_t *)&ctrl7, 1);
-    return err;
-}
-
-bool imu_init(const imu_config_t *cfg) {
-    bus_init();
-
+static imu_model_t probe(void) {
     uint8_t id = 0;
-    if (lsm6ds3_device_id_get(&ctx, &id) || id != LSM6DS3_ID) {
-        DBG("imu: WHO_AM_I 0x%02x, expected 0x%02x\n", id, LSM6DS3_ID);
-        return false;
+    imu_bus_read(NULL, REG_WHO_AM_I, &id, 1);
+    switch (id) {
+    case WHO_AM_I_LSM6DS3:
+        return IMU_MODEL_LSM6DS3;
+    case WHO_AM_I_LSM6DS3TRC:
+        return IMU_MODEL_LSM6DS3TRC;
+    default:
+        DBG("imu: unknown WHO_AM_I 0x%02x\n", id);
+        return IMU_MODEL_NONE;
     }
-    if (soft_reset()) {
-        DBG("imu: reset timeout\n");
-        return false;
-    }
+}
 
-    int32_t err = 0;
-    err |= lsm6ds3_i2c_interface_set(&ctx, LSM6DS3_I2C_DISABLE);
-    err |= lsm6ds3_block_data_update_set(&ctx, PROPERTY_ENABLE);
-    err |= lsm6ds3_auto_increment_set(&ctx, PROPERTY_ENABLE);
-
-    err |= lsm6ds3_xl_full_scale_set(&ctx, cfg->xl_fs);
-    err |= lsm6ds3_gy_full_scale_set(&ctx, cfg->gy_fs);
-    err |= config_xl_filters(cfg);
-    err |= config_gy_filters(cfg);
-
-    lsm6ds3_int1_route_t route = {
-        .int1_drdy_xl = cfg->xl_odr != LSM6DS3_XL_ODR_OFF,
-        .int1_drdy_g = cfg->gy_odr != LSM6DS3_GY_ODR_OFF,
-    };
-    err |= lsm6ds3_pin_int1_route_set(&ctx, &route);
-
-    err |= lsm6ds3_timestamp_res_set(&ctx, LSM6DS3_LSB_25us);
-    err |= lsm6ds3_timestamp_set(&ctx, PROPERTY_ENABLE);
-    err |= lsm6ds3_timestamp_rst_set(&ctx);
-
-    err |= lsm6ds3_xl_data_rate_set(&ctx, cfg->xl_odr);
-    err |= lsm6ds3_gy_data_rate_set(&ctx, cfg->gy_odr);
-
-    if (err) {
-        DBG("imu: config failed\n");
-        return false;
-    }
-    DBG("imu: ready\n");
+// SW_RESET is CTRL3_C bit 0 on both chips and self-clears when done.
+static bool soft_reset(void) {
+    uint8_t val = CTRL3_C_SW_RESET;
+    imu_bus_write(NULL, REG_CTRL3_C, &val, 1);
+    absolute_time_t deadline = make_timeout_time_ms(RESET_TIMEOUT_MS);
+    do {
+        if (time_reached(deadline)) {
+            return false;
+        }
+        imu_bus_read(NULL, REG_CTRL3_C, &val, 1);
+    } while (val & CTRL3_C_SW_RESET);
     return true;
 }
 
+imu_model_t imu_init(void) {
+    bus_init();
+
+    imu_model_t model = probe();
+    if (model == IMU_MODEL_NONE) {
+        return IMU_MODEL_NONE;
+    }
+    if (!soft_reset()) {
+        DBG("imu: reset timeout\n");
+        return IMU_MODEL_NONE;
+    }
+
+    bool ok = (model == IMU_MODEL_LSM6DS3) ? imu_lsm6ds3_configure() : imu_lsm6ds3trc_configure();
+    if (!ok) {
+        DBG("imu: config failed\n");
+        return IMU_MODEL_NONE;
+    }
+    DBG("imu: %s ready\n", imu_model_name(model));
+    return model;
+}
+
+const char *imu_model_name(imu_model_t model) {
+    switch (model) {
+    case IMU_MODEL_LSM6DS3:
+        return "LSM6DS3";
+    case IMU_MODEL_LSM6DS3TRC:
+        return "LSM6DS3TR-C";
+    case IMU_MODEL_NONE:
+        break;
+    }
+    return "none";
+}
+
 // The 24-bit counter is not latched across bytes; a second read resolves a carry mid-read.
-static int32_t read_timestamp(uint32_t *ts) {
-    uint32_t a, b;
-    int32_t err = lsm6ds3_timestamp_raw_get(&ctx, &a);
-    err |= lsm6ds3_timestamp_raw_get(&ctx, &b);
-    *ts = ((a >> 8) == (b >> 8)) ? a : b;
-    return err;
+static void read_timestamp(uint32_t *ts) {
+    uint8_t a[3], b[3];
+    imu_bus_read(NULL, REG_TIMESTAMP0, a, sizeof(a));
+    imu_bus_read(NULL, REG_TIMESTAMP0, b, sizeof(b));
+    const uint8_t *t = (a[1] == b[1] && a[2] == b[2]) ? a : b;
+    *ts = t[0] | (t[1] << 8) | ((uint32_t)t[2] << 16);
 }
 
 bool imu_data_ready(void) {
@@ -177,12 +149,13 @@ bool imu_data_ready(void) {
 bool imu_read(imu_sample_t *out) {
     // OUTX_L_G..OUTZ_H_XL: gyro XYZ then accel XYZ, little endian.
     uint8_t buf[12];
-    if (lsm6ds3_read_reg(&ctx, LSM6DS3_OUTX_L_G, buf, sizeof(buf))) {
+    if (imu_bus_read(NULL, REG_OUTX_L_G, buf, sizeof(buf))) {
         return false;
     }
     for (int i = 0; i < 3; i++) {
         out->gyro[i] = (int16_t)(buf[2 * i] | (buf[2 * i + 1] << 8));
         out->accel[i] = (int16_t)(buf[6 + 2 * i] | (buf[6 + 2 * i + 1] << 8));
     }
-    return read_timestamp(&out->timestamp) == 0;
+    read_timestamp(&out->timestamp);
+    return true;
 }

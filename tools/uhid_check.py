@@ -5,7 +5,7 @@ Loads gamepad_report_desc from the built ELF, creates a virtual USB HID device,
 prints the evdev capabilities and absinfo the kernel assigns, then sends reports
 and prints the resulting events.
 
-    sudo python3 tools/uhid_check.py [build/pico-lsm6ds3.elf]
+    sudo python3 tools/uhid_check.py [build/pico-lsm6ds3.elf] [LSM6DS3|LSM6DS3TR-C]
 """
 import fcntl
 import glob
@@ -73,15 +73,16 @@ def bits(sysfs_hex):
 
 def main():
     elf = sys.argv[1] if len(sys.argv) > 1 else "build/pico-lsm6ds3.elf"
+    name = sys.argv[2] if len(sys.argv) > 2 else "LSM6DS3"
     rd = elf_symbol(elf, "gamepad_report_desc")
     print(f"report descriptor: {len(rd)} bytes")
 
     fd = os.open("/dev/uhid", os.O_RDWR)
-    create = struct.pack("<128s64s64sHHIIII", b"LSM6DS3", b"uhid-check", b"", len(rd), BUS_USB,
+    create = struct.pack("<128s64s64sHHIIII", name.encode(), b"uhid-check", b"", len(rd), BUS_USB,
                          0x2E8A, 0x000A, 0x0100, 0) + rd
     uhid_write(fd, UHID_CREATE2, create)
     try:
-        dev, sysfs = find_event_node("LSM6DS3")
+        dev, sysfs = find_event_node(name)
         caps = sysfs + "/device/capabilities"
         abs_bits = bits(open(caps + "/abs").read())
         key_bits = bits(open(caps + "/key").read())
