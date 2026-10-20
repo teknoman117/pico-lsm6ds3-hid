@@ -44,7 +44,7 @@ add_executable(pico-lsm6ds3
         src/imu.c
         src/imu_lsm6ds3.c
         src/imu_lsm6ds3trc.c
-        src/gamepad.c
+        src/report.c
         src/usb_descriptors.c
         src/status_led.c
         )

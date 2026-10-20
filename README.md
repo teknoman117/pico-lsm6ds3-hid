@@ -1,11 +1,11 @@
 # pico-lsm6ds3
 
-RP2040 firmware that exposes an LSM6DS3 or LSM6DS3TR-C accelerometer + gyroscope as a USB HID
-gamepad. The chip is detected by its WHO_AM_I register and the gamepad is named after it:
-`LSM6DS3` or `LSM6DS3TR-C`. It works with the Linux generic HID driver, follows the kernel gamepad
-spec, reports at 1000 Hz, and carries the sensor's hardware timestamp for sensor fusion.
+RP2040 (or RP2350 / Pico 2) firmware that reads an LSM6DS3 or LSM6DS3TR-C over SPI at 1666 Hz,
+sums 8 samples per window, timestamps each window with the Pico's crystal clock, and sends one
+USB HID report per window (~208 Hz) to a Linux host. The device is named after the detected
+sensor (`LSM6DS3` or `LSM6DS3TR-C`) and appears as an evdev device via the generic HID driver.
 
-See `docs/architecture.md` for internals and `AGENTS.md` for project rules.
+Requirements: `docs/requirements.md`. Internals: `docs/architecture.md`. Project rules: `AGENTS.md`.
 
 ## Wiring
 
@@ -25,7 +25,7 @@ Requires the Pico SDK 2.x toolchain (as installed by the Raspberry Pi Pico VS Co
 `~/.pico-sdk`).
 
 ```sh
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release   # or Debug
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release   # or Debug; add -DPICO_BOARD=pico2 for Pico 2
 ninja -C build
 ```
 
@@ -40,79 +40,63 @@ picotool load -f -x build/pico-lsm6ds3.uf2
 
 ## Configuration
 
-Edit `src/config.h`. These apply to whichever sensor is fitted:
+Edit `src/config.h`. Defaults follow `docs/requirements.md`:
 
-- `IMU_XL_ODR`, `IMU_GY_ODR`: output data rate (default 1.66 kHz). The LSM6DS3 gyro tops out at
-  1.66 kHz and is clamped; the LSM6DS3TR-C goes to 6.66 kHz.
-- `IMU_XL_FS`, `IMU_GY_FS`: full scale (default ±4 g, ±2000 dps).
-- `IMU_XL_FILTER`: `IMU_XL_FILTER_NONE`, `_LPF2` or `_HPF`, with `IMU_XL_LPF2_BW` / `IMU_XL_HPF_BW`.
+- `IMU_XL_ODR`, `IMU_GY_ODR`: 1666 Hz. Keep them equal; gyro data-ready paces sampling.
+- `IMU_XL_FS`, `IMU_GY_FS`: ±4 g, ±500 dps.
+- `IMU_XL_FILTER`: off (`IMU_XL_FILTER_NONE`); `_LPF2` or `_HPF` with `IMU_XL_LPF2_BW` / `IMU_XL_HPF_BW`.
+- `IMU_AVERAGE_N`: 8 samples per report. `IMU_SETTLE_SAMPLES`: 168 discarded at start (100.8 ms).
+
+The report rate is the gyro ODR divided by `IMU_AVERAGE_N`; the host polls every 1 ms.
 
 Chip-specific filters:
 
-- LSM6DS3: `IMU_DS3_XL_AA_MANUAL` / `IMU_DS3_XL_AA_BW` (analog anti-aliasing),
-  `IMU_DS3_GY_HPF_EN` / `IMU_DS3_GY_HPF_BW` (gyro high-pass).
-- LSM6DS3TR-C: `IMU_TRC_XL_ANALOG_BW`, `IMU_TRC_XL_LPF2_LOW_NOISE`, `IMU_TRC_GY_FILTER`
-  (gyro high-pass / LPF1 combinations).
+- LSM6DS3: `IMU_DS3_XL_AA_MANUAL` / `IMU_DS3_XL_AA_BW` (analog anti-aliasing, 100 Hz),
+  `IMU_DS3_GY_HPF_EN` / `IMU_DS3_GY_HPF_BW` (gyro high-pass, off).
+- LSM6DS3TR-C: `IMU_TRC_XL_ANALOG_BW` (400 Hz), `IMU_TRC_XL_LPF2_LOW_NOISE`,
+  `IMU_TRC_GY_FILTER` (gyro high-pass / LPF1, off).
 
 ## Using it on Linux
 
-As a gamepad (evdev / SDL / joystick APIs):
-
-| evdev | Data |
+| evdev | Field |
 |---|---|
-| `ABS_X`, `ABS_Y`, `ABS_Z` | accel X, Y, Z |
-| `ABS_RX`, `ABS_RY`, `ABS_RZ` | gyro X, Y, Z |
-| `BTN_SOUTH`, `BTN_EAST` | always released (spec requirement) |
-| `ABS_MISC` | sensor timestamp, 24-bit, ~25 µs/LSB |
+| `ABS_RX`, `ABS_RY`, `ABS_RZ` | gyro X, Y, Z: sum of 8 raw samples |
+| `ABS_X`, `ABS_Y`, `ABS_Z` | accel X, Y, Z: sum of 8 raw samples |
+| `ABS_MISC` | timestamp: window midpoint, Pico µs mod 2^31 |
+| `ABS_RUDDER` | sequence: +1 per report, mod 2^31 |
+| `ABS_THROTTLE` | temperature: `OUT_TEMP` raw, last sample |
+| `ABS_WHEEL` | flags: bit 0 sample missed, bit 1 USB busy (reports were replaced), bit 2 error |
 
-```sh
-evtest   # pick "LSM6DS3" or "LSM6DS3TR-C"
-```
+- **Scaling:** divide sums by 8, then use the full-scale sensitivity:
 
-Each `SYN_REPORT` frame holds one sample and its `ABS_MISC` timestamp. Axes have no kernel
-fuzz/deadzone applied. Note that SDL and games will list `ABS_MISC` as an extra, constantly
-moving axis.
+  | Accel FS | mg/LSB | Gyro FS | mdps/LSB |
+  |---|---|---|---|
+  | ±2 g | 0.061 | ±125 dps | 4.375 |
+  | ±4 g | 0.122 | ±250 dps | 8.75 |
+  | ±8 g | 0.244 | ±500 dps | 17.5 |
+  | ±16 g | 0.488 | ±1000 dps | 35 |
+  | | | ±2000 dps | 70 |
 
-Raw reports are also available on `/dev/hidrawN`: 17 bytes, little endian, no report ID:
+  Temperature: 25 °C + raw / 16 (LSM6DS3) or raw / 256 (LSM6DS3TR-C).
+- **Timing:** use the timestamp, not event arrival time. It comes from the Pico's crystal
+  (±20 ppm); the sensor's own rate is only nominal (one LSM6DS3 measured 0.9% fast).
+- **Events:** the input core sends no event for an unchanged axis; keep the last value of each and
+  assemble a sample at every `SYN_REPORT`. Sequence and timestamp change in every report.
+- **Errors:** with no, unknown or misconfigured sensor the device keeps reporting at the normal
+  rate with all data 0 and flag bit 2 set.
+- **Classification:** udev tags the device `ID_INPUT_ACCELEROMETER`, not a joystick, so
+  SDL-based joystick code ignores it. The kernel's `joydev` still creates a `/dev/input/jsN`.
 
-| Offset | Type | Field |
-|---|---|---|
-| 0 | int16 ×3 | accel X, Y, Z |
-| 6 | int16 ×3 | gyro X, Y, Z |
-| 12 | uint8 | buttons |
-| 13 | uint32 | timestamp, 24-bit, ~25 µs/LSB |
-
-The timestamp comes from the sensor's internal timer (same format on both chips) and wraps
-modulo 2^24; compute `dt = ((t - t_prev) & 0xFFFFFF) * tick`. The tick is 25 µs nominal but
-follows the sensor's internal oscillator (one LSM6DS3 measured ~24.5 µs, ~2% fast), so for
-accurate absolute time estimate `tick` against the host clock.
-
-Scale (LSB → unit), identical on both chips:
-
-| Accel FS | mg/LSB | Gyro FS | mdps/LSB |
-|---|---|---|---|
-| ±2 g | 0.061 | ±125 dps | 4.375 |
-| ±4 g | 0.122 | ±250 dps | 8.75 |
-| ±8 g | 0.244 | ±500 dps | 17.5 |
-| ±16 g | 0.488 | ±1000 dps | 35 |
-| | | ±2000 dps | 70 |
+Raw reports are also on `/dev/hidrawN`: 35 bytes, little endian, no report ID, in this order:
+gyro sums (3 × int32), accel sums (3 × int32), timestamp (uint32), sequence (uint32),
+temperature (int16), flags (uint8).
 
 ```python
 import struct
-TICK = 25e-6  # nominal; calibrate against the host clock for absolute accuracy
+REPORT = struct.Struct("<6i2IhB")
 with open("/dev/hidraw0", "rb", buffering=0) as f:
-    prev = None
     while True:
-        ax, ay, az, gx, gy, gz, btn, ts = struct.unpack("<6hBI", f.read(17))
-        if prev is not None:
-            dt = ((ts - prev) & 0xFFFFFF) * TICK
-        prev = ts
-```
-
-To check the kernel mapping without hardware (creates a virtual device via `/dev/uhid`):
-
-```sh
-sudo python3 tools/uhid_check.py build/pico-lsm6ds3.elf [LSM6DS3TR-C]
+        gx, gy, gz, ax, ay, az, ts, seq, temp, flags = REPORT.unpack(f.read(REPORT.size))
 ```
 
 hidraw access for your user (udev rule, e.g. `/etc/udev/rules.d/70-lsm6ds3.rules`):
@@ -121,11 +105,20 @@ hidraw access for your user (udev rule, e.g. `/etc/udev/rules.d/70-lsm6ds3.rules
 KERNEL=="hidraw*", ATTRS{idVendor}=="2e8a", ATTRS{idProduct}=="000a", TAG+="uaccess"
 ```
 
+(`0009` instead of `000a` on a Pico 2.)
+
+## Verification
+
+```sh
+python3 tools/verify_evdev.py 60      # requirements section 7 steps 1-2; keep the sensor still
+sudo python3 tools/uhid_check.py build/pico-lsm6ds3.elf   # kernel mapping via /dev/uhid, no hardware
+```
+
 ## Status LED
 
 | Colour | Meaning |
 |---|---|
-| Red | No LSM6DS3 / LSM6DS3TR-C detected (retries every second) |
+| Red | Sensor error: none, unknown or failed read-back (retries every second) |
 | Yellow | Waiting for USB host |
 | Green | Streaming |
 | Blue | USB suspended |
@@ -148,8 +141,6 @@ rtt server start 9090 0
 ```
 
 then `nc localhost 9090`.
-
-Release builds contain no debug output.
 
 ## Third-party
 

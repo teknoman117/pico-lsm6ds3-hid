@@ -1,15 +1,22 @@
 # AGENTS.md
 
-Rules for working in this repo. See `docs/architecture.md` for structure.
+Rules for working in this repo. See `docs/requirements.md` for what the firmware must do and
+`docs/architecture.md` for structure.
 
 ## Project
 
-- Raspberry Pi Pico (RP2040), Pico C/C++ SDK, CMake + Ninja. SDK/toolchain from `~/.pico-sdk`.
-- Exposes an LSM6DS3 or LSM6DS3TR-C (accel + gyro) as a USB HID gamepad for the Linux generic
-  HID driver, following the kernel gamepad spec (`Documentation/input/gamepad.rst`).
+- Raspberry Pi Pico (RP2040; must also build for RP2350 / Pico 2), Pico C/C++ SDK,
+  CMake + Ninja. SDK/toolchain from `~/.pico-sdk`.
+- Samples an LSM6DS3 or LSM6DS3TR-C (accel + gyro) and sends averaged windows as USB HID reports
+  for the Linux generic HID driver, per `docs/requirements.md`.
+- HID application is a Multi-axis Controller, not Gamepad/Joystick. Every field maps to a
+  distinct evdev code with fuzz 0; keep the mapping table in `docs/architecture.md` current.
 - The chip is identified at runtime by WHO_AM_I (0x69 LSM6DS3, 0x6A LSM6DS3TR-C).
-- Gamepad/USB product name is exactly the detected chip: `LSM6DS3` or `LSM6DS3TR-C`.
-- HID rate at least 1000 Hz (full-speed `bInterval` 1).
+- USB product name is exactly the detected chip: `LSM6DS3` or `LSM6DS3TR-C`.
+- Report rate = gyro ODR / `IMU_AVERAGE_N` (~208 Hz). No minimum rate; the endpoint is polled
+  every 1 ms (`bInterval` 1).
+- Timestamps come from the Pico clock (`time_us_64()`), never the sensor.
+- Sampling never waits on USB: one pending report, replaced (with the USB-busy flag) if unsent.
 
 ## Hardware (fixed)
 
@@ -25,11 +32,14 @@ Rules for working in this repo. See `docs/architecture.md` for structure.
 - Prefer existing open-source drivers. ST's `lsm6ds3-pid` and `lsm6ds3tr-c-pid` live in `lib/`;
   do not edit them. Never include both ST headers in one translation unit.
 - Sensor ODR, full scale and filter mode must stay easy to change in `src/config.h`.
+- Use the closest setting the sensor supports. Rates are binary divisions of the sensor clock;
+  keep timing integral rather than converting between nominal rates.
 
 ## Style
 
 - Comments are concise and state facts. No essays, no reasoning or thinking in comments.
-- Update `docs/architecture.md` when structure, mapping or config changes. Keep it brief.
+- Update `docs/architecture.md` when structure, mapping or config changes, and
+  `docs/requirements.md` sections 8-9 when the HID mapping or a deviation changes. Keep it brief.
 - Build must stay warning-free for `src/` with `-Wall -Wextra`.
 
 ## Build

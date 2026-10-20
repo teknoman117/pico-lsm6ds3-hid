@@ -1,7 +1,7 @@
 #include <string.h>
 
 #include "config.h"
-#include "gamepad.h"
+#include "report.h"
 #include "pico/unique_id.h"
 #include "pico/usb_reset.h"
 #include "tusb.h"
@@ -43,7 +43,7 @@ static const tusb_desc_device_t desc_device = {
 
 static const uint8_t desc_config[] = {
     TUD_CONFIG_DESCRIPTOR(1, ITF_NUM_TOTAL, 0, CONFIG_TOTAL_LEN, 0, 100),
-    TUD_HID_DESCRIPTOR(ITF_NUM_HID, 0, HID_ITF_PROTOCOL_NONE, GAMEPAD_REPORT_DESC_LEN,
+    TUD_HID_DESCRIPTOR(ITF_NUM_HID, 0, HID_ITF_PROTOCOL_NONE, REPORT_DESC_LEN,
                        EPNUM_HID_IN, CFG_TUD_HID_EP_BUFSIZE, USB_HID_POLL_MS),
     TUD_RPI_RESET_DESCRIPTOR(ITF_NUM_RESET, STR_RESET),
 };

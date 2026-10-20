@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Check the host-side HID mapping without hardware via /dev/uhid (needs root).
 
-Loads gamepad_report_desc from the built ELF, creates a virtual USB HID device,
+Loads report_desc from the built ELF, creates a virtual USB HID device,
 prints the evdev capabilities and absinfo the kernel assigns, then sends reports
 and prints the resulting events.
 
@@ -19,9 +19,10 @@ UHID_DESTROY, UHID_CREATE2, UHID_INPUT2 = 1, 11, 12
 UHID_EVENT_SIZE = 4 + 4372
 BUS_USB = 3
 EV_SYN, EV_KEY, EV_ABS = 0, 1, 3
-ABS_NAMES = {0: "ABS_X", 1: "ABS_Y", 2: "ABS_Z", 3: "ABS_RX", 4: "ABS_RY", 5: "ABS_RZ", 0x28: "ABS_MISC"}
-KEY_NAMES = {0x130: "BTN_SOUTH", 0x131: "BTN_EAST"}
-REPORT = struct.Struct("<6hBI")
+ABS_NAMES = {0: "ABS_X", 1: "ABS_Y", 2: "ABS_Z", 3: "ABS_RX", 4: "ABS_RY", 5: "ABS_RZ",
+             6: "ABS_THROTTLE", 7: "ABS_RUDDER", 8: "ABS_WHEEL", 0x28: "ABS_MISC"}
+# gyro_sum[3], accel_sum[3], timestamp, sequence, temperature, flags
+REPORT = struct.Struct("<6i2IhB")
 
 
 def elf_symbol(path, name):
@@ -74,7 +75,7 @@ def bits(sysfs_hex):
 def main():
     elf = sys.argv[1] if len(sys.argv) > 1 else "build/pico-lsm6ds3.elf"
     name = sys.argv[2] if len(sys.argv) > 2 else "LSM6DS3"
-    rd = elf_symbol(elf, "gamepad_report_desc")
+    rd = elf_symbol(elf, "report_desc")
     print(f"report descriptor: {len(rd)} bytes")
 
     fd = os.open("/dev/uhid", os.O_RDWR)
@@ -87,7 +88,7 @@ def main():
         abs_bits = bits(open(caps + "/abs").read())
         key_bits = bits(open(caps + "/key").read())
         print(f"node: {dev}")
-        print("keys:", [KEY_NAMES.get(k, hex(k)) for k in sorted(key_bits)])
+        print("keys:", [hex(k) for k in sorted(key_bits)])
         print("abs: ", [ABS_NAMES.get(a, hex(a)) for a in sorted(abs_bits)])
 
         evfd = os.open(dev, os.O_RDONLY | os.O_NONBLOCK)
@@ -97,10 +98,10 @@ def main():
             _, lo, hi, fuzz, flat, _ = struct.unpack("<6i", info)
             print(f"  {ABS_NAMES.get(a, hex(a)):9s} min={lo} max={hi} fuzz={fuzz} flat={flat}")
 
-        ts = 0xFFFF00  # crosses the 24-bit wrap
+        ts = 0x7FFFF000  # crosses the 2^31 wrap
         for i in range(5):
-            ts = (ts + 24) & 0xFFFFFF  # ~600 us per sample
-            report = REPORT.pack(100 * i, -100 * i, 16384, i, -i, 0, 0, ts)
+            ts = (ts + 4800) & 0x7FFFFFFF
+            report = REPORT.pack(100 * i, -100 * i, 4 * i, 0, 0, 32790, ts, i, 400 + i, 0)
             uhid_write(fd, UHID_INPUT2, struct.pack("<H", len(report)) + report)
             time.sleep(0.01)
 

@@ -70,23 +70,19 @@ bool imu_lsm6ds3_configure(void) {
     err |= lsm6ds3_i2c_interface_set(&ctx, LSM6DS3_I2C_DISABLE);
     err |= lsm6ds3_block_data_update_set(&ctx, PROPERTY_ENABLE);
     err |= lsm6ds3_auto_increment_set(&ctx, PROPERTY_ENABLE);
+    err |= lsm6ds3_xl_power_mode_set(&ctx, LSM6DS3_XL_HIGH_PERFORMANCE);
+    err |= lsm6ds3_gy_power_mode_set(&ctx, LSM6DS3_GY_HIGH_PERFORMANCE);
 
     err |= lsm6ds3_xl_full_scale_set(&ctx, (lsm6ds3_xl_fs_t)IMU_XL_FS);
     err |= lsm6ds3_gy_full_scale_set(&ctx, (lsm6ds3_fs_g_t)IMU_GY_FS);
     err |= config_xl_filters();
     err |= config_gy_filters();
 
-    lsm6ds3_int1_route_t route = {
-        .int1_drdy_xl = IMU_XL_ODR != IMU_ODR_OFF,
-        .int1_drdy_g = gy_odr != IMU_ODR_OFF,
-    };
+    // Gyro data-ready alone paces sampling.
+    lsm6ds3_int1_route_t route = {.int1_drdy_g = 1};
     err |= lsm6ds3_pin_int1_route_set(&ctx, &route);
-
-    err |= lsm6ds3_timestamp_res_set(&ctx, LSM6DS3_LSB_25us);
-    err |= lsm6ds3_timestamp_set(&ctx, PROPERTY_ENABLE);
 
     err |= lsm6ds3_xl_data_rate_set(&ctx, (lsm6ds3_odr_xl_t)IMU_XL_ODR);
     err |= lsm6ds3_gy_data_rate_set(&ctx, (lsm6ds3_odr_g_t)gy_odr);
-    err |= lsm6ds3_timestamp_rst_set(&ctx);
     return err == 0;
 }

@@ -60,26 +60,25 @@ typedef enum {
     IMU_XL_HPF_ODR_DIV_400 = 3,
 } imu_xl_hpf_bw_t;
 
-#define IMU_TIMESTAMP_US_PER_LSB 25
-#define IMU_TIMESTAMP_MASK       0x00FFFFFFu
-
-// Raw sensor counts, sensor axis order (X, Y, Z).
+// One averaging window of IMU_AVERAGE_N consecutive gyro data-ready samples.
 typedef struct {
-    int16_t gyro[3];
-    int16_t accel[3];
-    uint32_t timestamp; // sensor timer, 24-bit, IMU_TIMESTAMP_US_PER_LSB, wraps
-} imu_sample_t;
+    int32_t gyro_sum[3];  // raw counts, sensor axes
+    int32_t accel_sum[3]; // raw counts, sensor axes
+    uint64_t time_us;     // mean of the samples' Pico time_us_64() (window midpoint)
+    int16_t temperature;  // OUT_TEMP raw, last sample of the window
+    bool sample_missed;   // a gap > 1.5 sample periods occurred in this window
+} imu_window_t;
 
-// Sets up SPI/GPIO, identifies the chip by WHO_AM_I, applies config.h and starts the
-// INT1 IRQ. Returns IMU_MODEL_NONE on failure. Safe to call again.
-imu_model_t imu_init(void);
+// Called in IRQ context for each completed window.
+typedef void (*imu_window_cb_t)(const imu_window_t *window);
+
+// Sets up SPI/GPIO, identifies the chip by WHO_AM_I, applies config.h, verifies it by
+// read-back and starts sampling. Returns IMU_MODEL_NONE on failure. Safe to call again.
+imu_model_t imu_init(imu_window_cb_t cb);
 
 const char *imu_model_name(imu_model_t model);
 
-// Samples are read in the INT1 (data-ready) IRQ and queued. Returns false when empty.
-bool imu_pop(imu_sample_t *out);
-
-// Samples dropped because the queue was full.
-uint32_t imu_overflow_count(void);
+// Nominal time per window for the configured gyro ODR.
+uint32_t imu_window_period_us(void);
 
 #endif

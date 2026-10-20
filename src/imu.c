@@ -1,5 +1,7 @@
 #include "imu.h"
 
+#include <string.h>
+
 #include "config.h"
 #include "debug.h"
 #include "hardware/dma.h"
@@ -8,36 +10,38 @@
 #include "hardware/spi.h"
 #include "imu_bus.h"
 #include "pico/time.h"
-#include "pico/util/queue.h"
 
 #define SPI_READ_BIT     0x80
 #define BOOT_TIME_MS     20
 #define RESET_TIMEOUT_MS 50
-#define SAMPLE_QUEUE_LEN 32
+#define MAX_RECORDED     32
 
 // Registers shared by LSM6DS3 and LSM6DS3TR-C.
 #define REG_WHO_AM_I     0x0F
 #define REG_CTRL3_C      0x12
 #define CTRL3_C_SW_RESET 0x01
-#define REG_OUTX_L_G     0x22
-#define REG_TIMESTAMP0   0x40
-#define REG_TIMESTAMP2   0x42
+#define REG_OUT_TEMP_L   0x20
 
-// One burst covers outputs through the timestamp. 0x2E..0x3F (sensor hub, FIFO status/data)
-// have no read side effects with the FIFO in bypass.
-#define BURST_LEN        (REG_TIMESTAMP2 - REG_OUTX_L_G + 1)
-#define BURST_TS_OFFSET  (REG_TIMESTAMP0 - REG_OUTX_L_G)
-#define TS_LEN           3
-#define TS_RESET_VALUE   0xAA
-
-// The sensor counter saturates at 0xFFFFFF instead of wrapping. Past this raw value it is
-// reset and the elapsed count folded into ts_base, so reported time wraps mod 2^24.
-#ifndef TS_RESET_THRESHOLD
-#define TS_RESET_THRESHOLD 0x800000u
-#endif
+// OUT_TEMP_L..OUTZ_H_XL: temperature, gyro XYZ, accel XYZ; int16 little endian.
+#define BURST_LEN        14
 
 #define WHO_AM_I_LSM6DS3    0x69
 #define WHO_AM_I_LSM6DS3TRC 0x6A
+
+static_assert(IMU_GY_ODR != IMU_ODR_OFF, "gyro data-ready drives sampling");
+static_assert(IMU_SETTLE_SAMPLES % IMU_AVERAGE_N == 0, "settling must end on a window boundary");
+
+// ODRs are binary divisions of 6.667 kHz (150 us), so every period is a whole number of us.
+static uint32_t odr_period_us(imu_odr_t odr) {
+    return 150u << (IMU_ODR_6K66HZ - odr);
+}
+
+// Every register written during configuration, for read-back verification.
+static struct {
+    uint8_t reg;
+    uint8_t val;
+} recorded[MAX_RECORDED];
+static int recorded_count = -1; // -1: not recording
 
 int32_t imu_bus_write(void *handle, uint8_t reg, const uint8_t *buf, uint16_t len) {
     (void)handle;
@@ -46,6 +50,21 @@ int32_t imu_bus_write(void *handle, uint8_t reg, const uint8_t *buf, uint16_t le
     spi_write_blocking(IMU_SPI, &addr, 1);
     spi_write_blocking(IMU_SPI, buf, len);
     gpio_put(PIN_IMU_CS, 1);
+
+    for (uint16_t i = 0; recorded_count >= 0 && i < len; i++) {
+        int j = 0;
+        while (j < recorded_count && recorded[j].reg != reg + i) {
+            j++;
+        }
+        if (j == MAX_RECORDED) {
+            return -1;
+        }
+        recorded[j].reg = reg + i;
+        recorded[j].val = buf[i];
+        if (j == recorded_count) {
+            recorded_count++;
+        }
+    }
     return 0;
 }
 
@@ -63,29 +82,23 @@ void imu_bus_delay_ms(uint32_t ms) {
     sleep_ms(ms);
 }
 
-static queue_t samples;
-static volatile uint32_t overflows;
-
-// DMA read: INT1 IRQ starts the burst, DMA IRQ chains a second timestamp read, queues the
-// sample and, when due, a counter reset write.
-// Byte 0 of each rx buffer is the address phase.
-typedef enum {
-    XFER_IDLE,
-    XFER_BURST,
-    XFER_TIMESTAMP,
-    XFER_TS_RESET,
-} xfer_state_t;
-
+// DMA read: INT1 IRQ timestamps the sample and starts the burst; the DMA IRQ accumulates it.
+// Byte 0 of rx is the address phase.
 static int dma_tx;
 static int dma_rx;
-static volatile xfer_state_t xfer = XFER_IDLE;
-static uint8_t tx_burst[1 + BURST_LEN] = {REG_OUTX_L_G | SPI_READ_BIT};
+static volatile bool xfer_busy;
+static uint8_t tx_burst[1 + BURST_LEN] = {REG_OUT_TEMP_L | SPI_READ_BIT};
 static uint8_t rx_burst[1 + BURST_LEN];
-static uint8_t tx_ts[1 + TS_LEN] = {REG_TIMESTAMP0 | SPI_READ_BIT};
-static uint8_t rx_ts[1 + TS_LEN];
-static const uint8_t tx_ts_reset[2] = {REG_TIMESTAMP2, TS_RESET_VALUE};
-static uint8_t rx_ts_reset[2];
-static uint32_t ts_base;
+
+// Sampling state; touched only by the IRQs while sampling runs.
+static imu_window_cb_t window_cb;
+static uint32_t sample_period_us;
+static uint64_t sample_time_us;
+static uint64_t prev_time_us;
+static uint32_t settle_samples;
+static imu_window_t window;
+static uint64_t window_time_sum;
+static uint32_t window_count;
 
 static void int1_irq_handler(void);
 static void dma_irq_handler(void);
@@ -99,27 +112,18 @@ static void dma_init(void) {
     channel_config_set_dreq(&c, spi_get_dreq(IMU_SPI, true));
     channel_config_set_read_increment(&c, true);
     channel_config_set_write_increment(&c, false);
-    dma_channel_configure(dma_tx, &c, &spi_get_hw(IMU_SPI)->dr, NULL, 0, false);
+    dma_channel_configure(dma_tx, &c, &spi_get_hw(IMU_SPI)->dr, tx_burst, sizeof(tx_burst), false);
 
     c = dma_channel_get_default_config(dma_rx);
     channel_config_set_transfer_data_size(&c, DMA_SIZE_8);
     channel_config_set_dreq(&c, spi_get_dreq(IMU_SPI, false));
     channel_config_set_read_increment(&c, false);
     channel_config_set_write_increment(&c, true);
-    dma_channel_configure(dma_rx, &c, NULL, &spi_get_hw(IMU_SPI)->dr, 0, false);
+    dma_channel_configure(dma_rx, &c, rx_burst, &spi_get_hw(IMU_SPI)->dr, sizeof(rx_burst), false);
 
     dma_channel_set_irq0_enabled(dma_rx, true);
     irq_add_shared_handler(DMA_IRQ_0, dma_irq_handler, PICO_SHARED_IRQ_HANDLER_DEFAULT_ORDER_PRIORITY);
     irq_set_enabled(DMA_IRQ_0, true);
-}
-
-static void start_xfer(const uint8_t *tx, uint8_t *rx, uint32_t len) {
-    gpio_put(PIN_IMU_CS, 0);
-    dma_channel_set_read_addr(dma_tx, tx, false);
-    dma_channel_set_trans_count(dma_tx, len, false);
-    dma_channel_set_write_addr(dma_rx, rx, false);
-    dma_channel_set_trans_count(dma_rx, len, false);
-    dma_start_channel_mask((1u << dma_tx) | (1u << dma_rx));
 }
 
 // Once only: re-running spi_init() resets the block while pins are muxed and glitches SCK.
@@ -146,7 +150,6 @@ static void bus_init(void) {
     gpio_set_dir(PIN_IMU_INT1, GPIO_IN);
     gpio_pull_down(PIN_IMU_INT1);
 
-    queue_init(&samples, sizeof(imu_sample_t), SAMPLE_QUEUE_LEN);
     dma_init();
     gpio_add_raw_irq_handler(PIN_IMU_INT1, int1_irq_handler);
     irq_set_enabled(IO_IRQ_BANK0, true);
@@ -186,18 +189,50 @@ static bool soft_reset(void) {
     return true;
 }
 
-imu_model_t imu_init(void) {
+// Applies config.h, then reads back every register the driver wrote.
+static bool configure(imu_model_t model) {
+    recorded_count = 0;
+    bool ok = (model == IMU_MODEL_LSM6DS3) ? imu_lsm6ds3_configure() : imu_lsm6ds3trc_configure();
+    int count = recorded_count;
+    recorded_count = -1;
+    if (!ok) {
+        DBG("imu: config failed\n");
+        return false;
+    }
+
+    for (int i = 0; i < count; i++) {
+        uint8_t val = 0;
+        imu_bus_read(NULL, recorded[i].reg, &val, 1);
+        if (val != recorded[i].val) {
+            DBG("imu: reg 0x%02x wrote 0x%02x read 0x%02x\n", recorded[i].reg, recorded[i].val, val);
+            ok = false;
+        }
+    }
+    return ok;
+}
+
+static void reset_sampling(imu_model_t model) {
+    imu_odr_t gy_odr = IMU_GY_ODR;
+    if (model == IMU_MODEL_LSM6DS3 && gy_odr > IMU_ODR_1K66HZ) {
+        gy_odr = IMU_ODR_1K66HZ;
+    }
+    sample_period_us = odr_period_us(gy_odr);
+    prev_time_us = 0;
+    memset(&window, 0, sizeof(window));
+    window_time_sum = 0;
+    window_count = 0;
+    settle_samples = IMU_SETTLE_SAMPLES;
+}
+
+imu_model_t imu_init(imu_window_cb_t cb) {
     bus_init();
 
-    // The IRQ/DMA path owns SPI while streaming; stop it before touching the chip.
+    // The IRQ/DMA path owns SPI while sampling; stop it before touching the chip.
     set_int1_irq(false);
-    while (xfer != XFER_IDLE) {
+    while (xfer_busy) {
         tight_loop_contents();
     }
-    imu_sample_t stale;
-    while (queue_try_remove(&samples, &stale)) {
-    }
-    ts_base = 0;
+    window_cb = cb;
 
     imu_model_t model = probe();
     if (model == IMU_MODEL_NONE) {
@@ -207,12 +242,11 @@ imu_model_t imu_init(void) {
         DBG("imu: reset timeout\n");
         return IMU_MODEL_NONE;
     }
-
-    bool ok = (model == IMU_MODEL_LSM6DS3) ? imu_lsm6ds3_configure() : imu_lsm6ds3trc_configure();
-    if (!ok) {
-        DBG("imu: config failed\n");
+    if (!configure(model)) {
         return IMU_MODEL_NONE;
     }
+
+    reset_sampling(model);
     DBG("imu: %s ready\n", imu_model_name(model));
     set_int1_irq(true);
     return model;
@@ -230,44 +264,56 @@ const char *imu_model_name(imu_model_t model) {
     return "none";
 }
 
-static uint32_t ts_from_bytes(const uint8_t *t) {
-    return t[0] | (t[1] << 8) | ((uint32_t)t[2] << 16);
+uint32_t imu_window_period_us(void) {
+    return odr_period_us(IMU_GY_ODR) * IMU_AVERAGE_N;
 }
 
-// Returns true if the sensor counter should be reset now.
-static bool finish_sample(void) {
-    const uint8_t *out = &rx_burst[1]; // OUTX_L_G..OUTZ_H_XL: gyro XYZ then accel XYZ, LE
-    imu_sample_t s;
+static int16_t le16(const uint8_t *b) {
+    return (int16_t)(b[0] | (b[1] << 8));
+}
+
+// Average by count: exactly IMU_AVERAGE_N consecutive samples per window, none dropped.
+static void accumulate(uint64_t t, const uint8_t *b) {
+    bool gap = prev_time_us != 0 && (t - prev_time_us) > sample_period_us * 3 / 2;
+    prev_time_us = t;
+    if (settle_samples > 0) {
+        settle_samples--;
+        return;
+    }
+
+    window.sample_missed |= gap;
+    window.temperature = le16(&b[0]);
     for (int i = 0; i < 3; i++) {
-        s.gyro[i] = (int16_t)(out[2 * i] | (out[2 * i + 1] << 8));
-        s.accel[i] = (int16_t)(out[6 + 2 * i] | (out[6 + 2 * i + 1] << 8));
+        window.gyro_sum[i] += le16(&b[2 + 2 * i]);
+        window.accel_sum[i] += le16(&b[8 + 2 * i]);
     }
-    // Bytes are not latched and read low first, so a carry mid-read gives a value that is
-    // too high. The burst read precedes the second read; if it is larger, it is torn.
-    uint32_t a = ts_from_bytes(&rx_burst[1 + BURST_TS_OFFSET]);
-    uint32_t b = ts_from_bytes(&rx_ts[1]);
-    s.timestamp = (ts_base + (a <= b ? a : b)) & IMU_TIMESTAMP_MASK;
+    window_time_sum += t;
 
-    if (!queue_try_add(&samples, &s)) {
-        overflows++;
+    if (++window_count == IMU_AVERAGE_N) {
+        window.time_us = window_time_sum / IMU_AVERAGE_N;
+        window_cb(&window);
+        memset(&window, 0, sizeof(window));
+        window_time_sum = 0;
+        window_count = 0;
     }
-
-    if (b < TS_RESET_THRESHOLD) {
-        return false;
-    }
-    ts_base += b;
-    return true;
 }
 
-// INT1 is a level that stays high until the outputs are read. Level triggering re-fires
-// if a new sample lands during the read, where an edge trigger would stall.
+// INT1 is a latched level that stays high until the outputs are read; the LSM6DS3 has no
+// pulsed DRDY mode. Level triggering re-fires after a late read, where an edge would stall.
 static void int1_irq_handler(void) {
     if (!(gpio_get_irq_event_mask(PIN_IMU_INT1) & GPIO_IRQ_LEVEL_HIGH)) {
         return;
     }
+    sample_time_us = time_us_64();
     set_int1_irq(false);
-    xfer = XFER_BURST;
-    start_xfer(tx_burst, rx_burst, sizeof(tx_burst));
+    xfer_busy = true;
+
+    gpio_put(PIN_IMU_CS, 0);
+    dma_channel_set_read_addr(dma_tx, tx_burst, false);
+    dma_channel_set_trans_count(dma_tx, sizeof(tx_burst), false);
+    dma_channel_set_write_addr(dma_rx, rx_burst, false);
+    dma_channel_set_trans_count(dma_rx, sizeof(rx_burst), false);
+    dma_start_channel_mask((1u << dma_tx) | (1u << dma_rx));
 }
 
 // RX completion means every byte has been clocked, so CS can be released.
@@ -278,24 +324,7 @@ static void dma_irq_handler(void) {
     dma_channel_acknowledge_irq0(dma_rx);
     gpio_put(PIN_IMU_CS, 1);
 
-    if (xfer == XFER_BURST) {
-        xfer = XFER_TIMESTAMP;
-        start_xfer(tx_ts, rx_ts, sizeof(tx_ts));
-        return;
-    }
-    if (xfer == XFER_TIMESTAMP && finish_sample()) {
-        xfer = XFER_TS_RESET;
-        start_xfer(tx_ts_reset, rx_ts_reset, sizeof(tx_ts_reset));
-        return;
-    }
-    xfer = XFER_IDLE;
+    accumulate(sample_time_us, &rx_burst[1]);
+    xfer_busy = false;
     set_int1_irq(true);
-}
-
-bool imu_pop(imu_sample_t *out) {
-    return queue_try_remove(&samples, out);
-}
-
-uint32_t imu_overflow_count(void) {
-    return overflows;
 }
