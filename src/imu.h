@@ -27,10 +27,14 @@ typedef struct {
     lsm6ds3_hpcf_g_t gy_hpf_bw;
 } imu_config_t;
 
+#define IMU_TIMESTAMP_US_PER_LSB 25
+#define IMU_TIMESTAMP_MASK       0x00FFFFFFu
+
 // Raw sensor counts, sensor axis order (X, Y, Z).
 typedef struct {
     int16_t gyro[3];
     int16_t accel[3];
+    uint32_t timestamp; // sensor timer, 24-bit, IMU_TIMESTAMP_US_PER_LSB, wraps
 } imu_sample_t;
 
 // Sets up SPI/GPIO, verifies WHO_AM_I and applies cfg. Safe to call again on failure.

@@ -41,20 +41,31 @@ static const stmdev_ctx_t ctx = {
     .handle = NULL,
 };
 
+// Once only: re-running spi_init() resets the block while pins are muxed and glitches SCK.
 static void bus_init(void) {
+    static bool done;
+    if (done) {
+        return;
+    }
+    done = true;
+
+    // CS high before any clock edge; GPIO reset state is pulled low.
+    gpio_init(PIN_IMU_CS);
+    gpio_put(PIN_IMU_CS, 1);
+    gpio_set_dir(PIN_IMU_CS, GPIO_OUT);
+
+    // Mode 3 set before muxing so SCK comes up idle high.
     spi_init(IMU_SPI, IMU_SPI_BAUD_HZ);
     spi_set_format(IMU_SPI, 8, SPI_CPOL_1, SPI_CPHA_1, SPI_MSB_FIRST);
     gpio_set_function(PIN_IMU_MISO, GPIO_FUNC_SPI);
     gpio_set_function(PIN_IMU_SCK, GPIO_FUNC_SPI);
     gpio_set_function(PIN_IMU_MOSI, GPIO_FUNC_SPI);
 
-    gpio_init(PIN_IMU_CS);
-    gpio_put(PIN_IMU_CS, 1);
-    gpio_set_dir(PIN_IMU_CS, GPIO_OUT);
-
     gpio_init(PIN_IMU_INT1);
     gpio_set_dir(PIN_IMU_INT1, GPIO_IN);
     gpio_pull_down(PIN_IMU_INT1);
+
+    sleep_ms(BOOT_TIME_MS);
 }
 
 static int32_t soft_reset(void) {
@@ -108,7 +119,6 @@ static int32_t config_gy_filters(const imu_config_t *cfg) {
 
 bool imu_init(const imu_config_t *cfg) {
     bus_init();
-    sleep_ms(BOOT_TIME_MS);
 
     uint8_t id = 0;
     if (lsm6ds3_device_id_get(&ctx, &id) || id != LSM6DS3_ID) {
@@ -136,6 +146,10 @@ bool imu_init(const imu_config_t *cfg) {
     };
     err |= lsm6ds3_pin_int1_route_set(&ctx, &route);
 
+    err |= lsm6ds3_timestamp_res_set(&ctx, LSM6DS3_LSB_25us);
+    err |= lsm6ds3_timestamp_set(&ctx, PROPERTY_ENABLE);
+    err |= lsm6ds3_timestamp_rst_set(&ctx);
+
     err |= lsm6ds3_xl_data_rate_set(&ctx, cfg->xl_odr);
     err |= lsm6ds3_gy_data_rate_set(&ctx, cfg->gy_odr);
 
@@ -145,6 +159,15 @@ bool imu_init(const imu_config_t *cfg) {
     }
     DBG("imu: ready\n");
     return true;
+}
+
+// The 24-bit counter is not latched across bytes; a second read resolves a carry mid-read.
+static int32_t read_timestamp(uint32_t *ts) {
+    uint32_t a, b;
+    int32_t err = lsm6ds3_timestamp_raw_get(&ctx, &a);
+    err |= lsm6ds3_timestamp_raw_get(&ctx, &b);
+    *ts = ((a >> 8) == (b >> 8)) ? a : b;
+    return err;
 }
 
 bool imu_data_ready(void) {
@@ -161,5 +184,5 @@ bool imu_read(imu_sample_t *out) {
         out->gyro[i] = (int16_t)(buf[2 * i] | (buf[2 * i + 1] << 8));
         out->accel[i] = (int16_t)(buf[6 + 2 * i] | (buf[6 + 2 * i + 1] << 8));
     }
-    return true;
+    return read_timestamp(&out->timestamp) == 0;
 }

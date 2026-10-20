@@ -15,6 +15,7 @@ Bare-metal, single loop on core 0. No RTOS.
 | `src/tusb_config.h` | TinyUSB device config. |
 | `src/status_led.[ch]`, `src/ws2812.pio` | NeoPixel status via PIO. |
 | `src/debug.h` | `DBG()` printf macro, compiled out when `NDEBUG` is defined. |
+| `tools/uhid_check.py` | Host-side check of the HID mapping via `/dev/uhid`, no hardware needed. |
 | `lib/lsm6ds3-pid/` | ST's platform-independent LSM6DS3 driver, vendored unmodified. See `UPSTREAM.md`. |
 
 ## Hardware
@@ -28,31 +29,47 @@ Bare-metal, single loop on core 0. No RTOS.
 | IMU INT1 | 20 |
 | NeoPixel | 23 |
 
-SPI mode 3, 10 MHz requested.
+SPI mode 3, 10 MHz requested. Bus bring-up order (once per boot): CS driven high, SPI block
+configured for mode 3, then pins muxed so SCK starts idle high with CS deasserted; then 20 ms boot wait.
 
 ## Data flow
 
 1. `imu_init()` checks WHO_AM_I (0x69), soft-resets, disables I2C, enables BDU and auto-increment,
-   applies full scale and filters, routes accel/gyro data-ready to INT1, then sets ODR last.
-2. Main loop polls INT1 level. When high, one 12-byte burst reads gyro XYZ then accel XYZ.
+   applies full scale and filters, routes accel/gyro data-ready to INT1, enables and zeroes the
+   25 us timestamp counter, then sets ODR last.
+2. Main loop polls INT1 level. When high, one 12-byte burst reads gyro XYZ then accel XYZ,
+   followed by the 24-bit timestamp (read twice to reject a carry between bytes).
 3. When the HID endpoint is free, the latest sample is sent. Interrupt IN endpoint, `bInterval` 1 ms
    (1000 Hz, the full-speed maximum).
 4. If the IMU is missing, init is retried every second; USB stays up so picotool still works.
 
 ## HID mapping
 
-Application collection is Generic Desktop / Game Pad, so the kernel's `hid-generic` + `hid-input`
-produce codes per `Documentation/input/gamepad.rst`:
+Top-level application is Generic Desktop / Multi-axis Controller; axes and buttons sit in a
+Physical Game Pad collection. The kernel's `hid-generic` + `hid-input` then produce codes per
+`Documentation/input/gamepad.rst`:
 
 | Report field | Source | evdev code |
 |---|---|---|
 | X, Y, Z (int16) | accel X, Y, Z raw | `ABS_X`, `ABS_Y`, `ABS_Z` |
 | Rx, Ry, Rz (int16) | gyro X, Y, Z raw | `ABS_RX`, `ABS_RY`, `ABS_RZ` |
 | Button 1, 2 | unused, always 0 | `BTN_SOUTH`, `BTN_EAST` |
+| Sensor 0x20:0x0529 Time Stamp (uint32) | sensor timer | `ABS_MISC` |
+
+Why not a Game Pad application: `hid-input` gives every field in one fuzz = range/256 and
+flat = range/16. That would suppress small IMU changes and drop most timestamp updates.
+Buttons still map to `BTN_GAMEPAD+n` through the Physical Game Pad usage.
+
+The Sensor page usage appears only as a field, never as a collection, so `hid-core` does not
+group the device as a sensor hub.
+
+Report is 17 bytes, little endian, no report ID: 6 x int16 axes, 1 button byte, uint32 timestamp.
+The timestamp is the sensor's 24-bit counter (25 us/LSB nominal, wraps every ~419 s); hosts take
+deltas modulo 2^24. It is captured when the sample is fetched, within one loop pass of data-ready.
+It arrives in the same `SYN_REPORT` frame as the axes it belongs to.
 
 The two buttons exist so the device advertises `BTN_GAMEPAD`, which the spec requires.
 Axis range is the full int16 range, so scale follows `IMU_XL_FS` / `IMU_GY_FS`.
-`hid-input` sets fuzz 255 / flat 4095 on gamepad axes; userspace can clear them with `EVIOCSABS`.
 
 ## USB
 
