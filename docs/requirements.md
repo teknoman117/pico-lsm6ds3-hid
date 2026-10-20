@@ -201,7 +201,7 @@ How the requirements map onto this firmware (`docs/architecture.md` has the desi
   timestamps are for.
 - **Error reports (section 6):** sent every 4800 us with gyro, accel and temperature 0 and bit 2
   set. Sequence and timestamp keep running so every error report still produces a `SYN_REPORT`.
-  Initialisation is retried every second.
+  The sensor is probed once at boot; an error latches until reset.
 - **joy_node (section 6):** a Multi-axis Controller alone does not stop udev classifying a
   device as a joystick. This device is safe because it has no keys and has `ABS_X/Y/Z`:
   systemd's `input_id` tags it `ID_INPUT_ACCELEROMETER` instead, so SDL-based `joy_node`

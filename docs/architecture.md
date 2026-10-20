@@ -9,7 +9,7 @@ report per window (~208 Hz). Requirements: `docs/requirements.md`. Bare-metal, c
 | Path | Role |
 |---|---|
 | `src/config.h` | All tunables: pins, ODR, full scale, filters, averaging, USB IDs, LED. Edit here first. |
-| `src/main.c` | Init, main loop: USB task, report sending, error-state reports, IMU retry. |
+| `src/main.c` | Init, main loop: USB task, report sending, error-state reports, debug profiling. |
 | `src/imu.[ch]` | Public IMU API, chip-neutral config enums, SPI bus, WHO_AM_I probe, soft reset, config read-back, INT1 IRQ + DMA sampling, averaging windows. |
 | `src/imu_bus.h` | Private: bus callbacks for the ST drivers, per-chip configure functions. |
 | `src/imu_lsm6ds3.c` | LSM6DS3 configuration via `lsm6ds3-pid`. |
@@ -52,7 +52,8 @@ configured for mode 3, then pins muxed so SCK starts idle high with CS deasserte
 4. Every byte the driver wrote is recorded by the bus layer and read back; any mismatch is an error.
 5. INT1 IRQ enabled. The first `IMU_SETTLE_SAMPLES` (168, 100.8 ms) are discarded.
 
-Errors leave `imu_init()` returning `IMU_MODEL_NONE`; it is retried every second.
+`imu_init()` runs once at boot. On error it returns `IMU_MODEL_NONE` and the device latches into
+the error state until reset (fixed hardware; no retry).
 
 ## Sampling
 
@@ -66,7 +67,7 @@ Errors leave `imu_init()` returning `IMU_MODEL_NONE`; it is retried every second
 - A gap > 1.5 sample periods between samples flags the window "sample missed".
 - Sample periods are exact: ODRs are binary divisions of 6.667 kHz, so period = 150 us << (10 - code).
 - Window complete: callback into `report_submit_window()` (IRQ context).
-- Only the IRQ/DMA path touches SPI while sampling; re-init disables it and waits first.
+- Only the IRQ/DMA path touches SPI once sampling starts.
 - The whole sampling path runs from RAM (`__not_in_flash_func`): both IRQ handlers,
   `accumulate()` and `report_submit_window()`. It calls nothing in flash: the INT1 enable and the
   timer are read inline instead of via the SDK's `gpio_set_irq_enabled()`/`time_us_64()`, and
@@ -112,7 +113,7 @@ With no keys and `ABS_X/Y/Z`, udev's `input_id` tags the device `ID_INPUT_ACCELE
 - VID:PID `2E8A:000A` (RP2040) / `2E8A:0009` (RP2350) so `picotool` finds the device without `--vid/--pid`.
 - No manufacturer string, so the kernel device name is exactly the product string.
 - Product string is the detected sensor: `LSM6DS3` or `LSM6DS3TR-C`; `USB_PRODUCT_DEFAULT`
-  (`LSM6DS3`) if none was found at boot. A later detection with a different name re-enumerates.
+  (`LSM6DS3`) if none was found at boot.
 - Serial number is the flash unique ID.
 - Interrupt IN endpoint, 64 bytes, `bInterval` 1 ms.
 - Interface 1 is the SDK `pico_usb_reset` vendor interface (`picotool reboot`, `picotool load -f`).

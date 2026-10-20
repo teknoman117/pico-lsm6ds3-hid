@@ -118,7 +118,7 @@ sudo python3 tools/uhid_check.py build/pico-lsm6ds3.elf   # kernel mapping via /
 
 | Colour | Meaning |
 |---|---|
-| Red | Sensor error: none, unknown or failed read-back (retries every second) |
+| Red | Sensor error: none, unknown or failed read-back (latched until reset) |
 | Yellow | Waiting for USB host |
 | Green | Streaming |
 | Blue | USB suspended |
@@ -141,6 +141,11 @@ rtt server start 9090 0
 ```
 
 then `nc localhost 9090`.
+
+## License
+
+MPL-2.0, see `LICENSE`. Vendored third-party code keeps its own license (BSD-3-Clause):
+`lib/lsm6ds3-pid`, `lib/lsm6ds3tr-c-pid`, `src/ws2812.pio`.
 
 ## Third-party
 

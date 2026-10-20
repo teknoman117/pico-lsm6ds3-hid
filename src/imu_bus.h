@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 #ifndef IMU_BUS_H
 #define IMU_BUS_H
 

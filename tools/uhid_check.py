@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MPL-2.0
 """Check the host-side HID mapping without hardware via /dev/uhid (needs root).
 
 Loads report_desc from the built ELF, creates a virtual USB HID device,

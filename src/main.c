@@ -1,4 +1,4 @@
-#include <string.h>
+// SPDX-License-Identifier: MPL-2.0
 
 #include "config.h"
 #include "debug.h"
@@ -10,7 +10,6 @@
 #include "tusb.h"
 #include "usb_descriptors.h"
 
-#define IMU_RETRY_MS 1000
 #define PROFILE_PERIOD_MS 1000
 
 static status_t current_status(bool imu_ok) {
@@ -36,18 +35,6 @@ static void print_profile(void) {
 }
 #endif
 
-// Re-enumerate if the detected sensor differs from the advertised product name.
-static void update_product_name(imu_model_t model) {
-    const char *name = imu_model_name(model);
-    if (strcmp(name, usb_product()) == 0) {
-        return;
-    }
-    usb_set_product(name);
-    tud_disconnect();
-    sleep_ms(USB_REENUM_MS);
-    tud_connect();
-}
-
 int main(void) {
 #ifndef NDEBUG
     stdio_init_all();
@@ -56,14 +43,15 @@ int main(void) {
 
     status_led_init();
 
-    // Identify the sensor before enumeration so the product string is right first time.
+    // Fixed hardware: the sensor is probed once. On failure the device latches into the
+    // error state and keeps reporting so the host sees the fault.
     imu_model_t model = imu_init(report_submit_window);
-    if (model != IMU_MODEL_NONE) {
+    bool imu_ok = model != IMU_MODEL_NONE;
+    if (imu_ok) {
         usb_set_product(imu_model_name(model));
     }
     tusb_init();
 
-    absolute_time_t next_retry = make_timeout_time_ms(IMU_RETRY_MS);
     absolute_time_t next_error_report = get_absolute_time();
 #ifndef NDEBUG
     absolute_time_t next_profile = make_timeout_time_ms(PROFILE_PERIOD_MS);
@@ -72,26 +60,16 @@ int main(void) {
     while (true) {
         tud_task();
 
-        // Error state: keep enumerating and reporting at the normal rate with the error flag.
-        if (model == IMU_MODEL_NONE) {
-            if (time_reached(next_error_report)) {
-                report_submit_error();
-                next_error_report = delayed_by_us(next_error_report, imu_window_period_us());
-            }
-            if (time_reached(next_retry)) {
-                model = imu_init(report_submit_window);
-                if (model != IMU_MODEL_NONE) {
-                    update_product_name(model);
-                }
-                next_retry = make_timeout_time_ms(IMU_RETRY_MS);
-            }
+        if (!imu_ok && time_reached(next_error_report)) {
+            report_submit_error();
+            next_error_report = delayed_by_us(next_error_report, imu_window_period_us());
         }
 
         report_task();
-        status_led_set(current_status(model != IMU_MODEL_NONE));
+        status_led_set(current_status(imu_ok));
 
 #ifndef NDEBUG
-        if (time_reached(next_profile)) {
+        if (imu_ok && time_reached(next_profile)) {
             print_profile();
             next_profile = delayed_by_ms(next_profile, PROFILE_PERIOD_MS);
         }

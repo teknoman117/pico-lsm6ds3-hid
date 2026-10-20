@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 #include "imu.h"
 
 #include "config.h"
@@ -87,7 +89,6 @@ void imu_bus_delay_ms(uint32_t ms) {
 // Byte 0 of rx is the address phase.
 static int dma_tx;
 static int dma_rx;
-static volatile bool xfer_busy;
 static uint8_t tx_burst[1 + BURST_LEN] = {REG_OUT_TEMP_L | SPI_READ_BIT};
 static uint8_t rx_burst[1 + BURST_LEN];
 
@@ -134,14 +135,7 @@ static void dma_init(void) {
     irq_set_enabled(DMA_IRQ_0, true);
 }
 
-// Once only: re-running spi_init() resets the block while pins are muxed and glitches SCK.
 static void bus_init(void) {
-    static bool done;
-    if (done) {
-        return;
-    }
-    done = true;
-
     // CS high before any clock edge; GPIO reset state is pulled low.
     gpio_init(PIN_IMU_CS);
     gpio_put(PIN_IMU_CS, 1);
@@ -279,12 +273,6 @@ static void reset_sampling(imu_model_t model) {
 
 imu_model_t imu_init(imu_window_cb_t cb) {
     bus_init();
-
-    // The IRQ/DMA path owns SPI while sampling; stop it before touching the chip.
-    set_int1_irq(false);
-    while (xfer_busy) {
-        tight_loop_contents();
-    }
     window_cb = cb;
 
     imu_model_t model = probe();
@@ -366,7 +354,6 @@ static void __not_in_flash_func(int1_irq_handler)(void) {
     }
     sample_time_us = now_us();
     set_int1_irq(false);
-    xfer_busy = true;
 
     gpio_put(PIN_IMU_CS, 0);
     dma_channel_set_read_addr(dma_tx, tx_burst, false);
@@ -396,6 +383,5 @@ static void __not_in_flash_func(dma_irq_handler)(void) {
         profile.max_cycles = cycles;
     }
 #endif
-    xfer_busy = false;
     set_int1_irq(true);
 }

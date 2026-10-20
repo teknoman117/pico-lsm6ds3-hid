@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 #ifndef DEBUG_H
 #define DEBUG_H
 

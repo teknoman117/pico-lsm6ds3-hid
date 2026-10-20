@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 #include <string.h>
 
 #include "config.h"
@@ -64,10 +66,6 @@ static const char *strings[STR_COUNT] = {
 
 void usb_set_product(const char *name) {
     strings[STR_PRODUCT] = name;
-}
-
-const char *usb_product(void) {
-    return strings[STR_PRODUCT];
 }
 
 uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid) {

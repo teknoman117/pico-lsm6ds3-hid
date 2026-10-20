@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 #ifndef IMU_H
 #define IMU_H
 
@@ -73,7 +75,7 @@ typedef struct {
 typedef void (*imu_window_cb_t)(const imu_window_t *window);
 
 // Sets up SPI/GPIO, identifies the chip by WHO_AM_I, applies config.h, verifies it by
-// read-back and starts sampling. Returns IMU_MODEL_NONE on failure. Safe to call again.
+// read-back and starts sampling. Returns IMU_MODEL_NONE on failure. Call once.
 imu_model_t imu_init(imu_window_cb_t cb);
 
 const char *imu_model_name(imu_model_t model);

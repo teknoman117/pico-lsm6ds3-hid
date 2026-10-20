@@ -38,6 +38,8 @@ Rules for working in this repo. See `docs/requirements.md` for what the firmware
 - Sensor ODR, full scale and filter mode must stay easy to change in `src/config.h`.
 - Use the closest setting the sensor supports. Rates are binary divisions of the sensor clock;
   keep timing integral rather than converting between nominal rates.
+- New source files carry an `SPDX-License-Identifier: MPL-2.0` header. Vendored code in `lib/`
+  and `src/ws2812.pio` keeps its BSD-3-Clause license.
 
 ## Style
 

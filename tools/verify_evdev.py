@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MPL-2.0
 """Requirements section 7, steps 1-2, against the live device over evdev.
 
 Finds the input device by name, prints absinfo (fuzz/flat) for every axis, then records for

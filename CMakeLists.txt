@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MPL-2.0
+
 # Generated Cmake Pico project file
 
 cmake_minimum_required(VERSION 3.13)

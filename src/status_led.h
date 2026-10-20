@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 #ifndef STATUS_LED_H
 #define STATUS_LED_H
 

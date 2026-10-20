@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 #ifndef TUSB_CONFIG_H
 #define TUSB_CONFIG_H
 

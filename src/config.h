@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MPL-2.0
+
 #ifndef CONFIG_H
 #define CONFIG_H
 
@@ -54,7 +56,7 @@
 #define IMU_TRC_GY_FILTER         LSM6DS3TR_C_LP2_ONLY
 
 // USB. Raspberry Pi stdio VID/PID so picotool finds the reset interface.
-// Product string is the detected sensor name; USB_PRODUCT_DEFAULT until one is found.
+// Product string is the detected sensor name, or USB_PRODUCT_DEFAULT if none was found.
 #define USB_VID             0x2E8A
 #if PICO_RP2350
 #define USB_PID             0x0009
@@ -63,7 +65,6 @@
 #endif
 #define USB_PRODUCT_DEFAULT "LSM6DS3"
 #define USB_HID_POLL_MS     1
-#define USB_REENUM_MS       100
 
 // Status LED
 #define NEOPIXEL_RGBW       0
