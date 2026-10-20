@@ -67,6 +67,13 @@ Errors leave `imu_init()` returning `IMU_MODEL_NONE`; it is retried every second
 - Sample periods are exact: ODRs are binary divisions of 6.667 kHz, so period = 150 us << (10 - code).
 - Window complete: callback into `report_submit_window()` (IRQ context).
 - Only the IRQ/DMA path touches SPI while sampling; re-init disables it and waits first.
+- The whole sampling path runs from RAM (`__not_in_flash_func`): both IRQ handlers,
+  `accumulate()` and `report_submit_window()`. It calls nothing in flash: the INT1 enable and the
+  timer are read inline instead of via the SDK's `gpio_set_irq_enabled()`/`time_us_64()`, and
+  struct copies/zeroing are explicit stores because `memcpy`/`memset` live in flash. The SDK IRQ
+  chain, vector table and TinyUSB's USB IRQ are already in RAM.
+- Debug builds count SysTick cycles in `accumulate()` and print calls, us/s, CPU share and
+  average/max cycles once per second. Measured on RP2040 at 125 MHz: avg 263, max 398 cycles.
 
 ## Reports
 

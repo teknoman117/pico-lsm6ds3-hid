@@ -64,36 +64,33 @@ static imu_report_t pending;
 static bool pending_valid;
 static uint32_t sequence;
 
-static void submit(imu_report_t *r) {
+// IRQ path, RAM-resident. Writes the slot field by field: struct copies and initialisers
+// compile to memcpy/memset calls, which live in flash.
+static void __not_in_flash_func(submit)(const imu_window_t *w, uint32_t timestamp, uint8_t flags) {
     uint32_t irq = save_and_disable_interrupts();
-    r->sequence = sequence++ & MOD_2_31;
     if (pending_valid) {
-        r->flags |= REPORT_FLAG_USB_BUSY;
+        flags |= REPORT_FLAG_USB_BUSY;
     }
-    pending = *r;
+    pending.gyro_sum[0] = w ? w->gyro_sum[0] : 0;
+    pending.gyro_sum[1] = w ? w->gyro_sum[1] : 0;
+    pending.gyro_sum[2] = w ? w->gyro_sum[2] : 0;
+    pending.accel_sum[0] = w ? w->accel_sum[0] : 0;
+    pending.accel_sum[1] = w ? w->accel_sum[1] : 0;
+    pending.accel_sum[2] = w ? w->accel_sum[2] : 0;
+    pending.temperature = w ? w->temperature : 0;
+    pending.timestamp = timestamp & MOD_2_31;
+    pending.sequence = sequence++ & MOD_2_31;
+    pending.flags = flags;
     pending_valid = true;
     restore_interrupts(irq);
 }
 
-void report_submit_window(const imu_window_t *w) {
-    imu_report_t r = {
-        .timestamp = (uint32_t)w->time_us & MOD_2_31,
-        .temperature = w->temperature,
-        .flags = w->sample_missed ? REPORT_FLAG_SAMPLE_MISSED : 0,
-    };
-    for (int i = 0; i < 3; i++) {
-        r.gyro_sum[i] = w->gyro_sum[i];
-        r.accel_sum[i] = w->accel_sum[i];
-    }
-    submit(&r);
+void __not_in_flash_func(report_submit_window)(const imu_window_t *w) {
+    submit(w, (uint32_t)w->time_us, w->sample_missed ? REPORT_FLAG_SAMPLE_MISSED : 0);
 }
 
 void report_submit_error(void) {
-    imu_report_t r = {
-        .timestamp = (uint32_t)time_us_64() & MOD_2_31,
-        .flags = REPORT_FLAG_ERROR,
-    };
-    submit(&r);
+    submit(NULL, (uint32_t)time_us_64(), REPORT_FLAG_ERROR);
 }
 
 void report_task(void) {

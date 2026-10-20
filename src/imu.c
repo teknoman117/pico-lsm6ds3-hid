@@ -1,13 +1,14 @@
 #include "imu.h"
 
-#include <string.h>
-
 #include "config.h"
 #include "debug.h"
 #include "hardware/dma.h"
 #include "hardware/gpio.h"
 #include "hardware/irq.h"
 #include "hardware/spi.h"
+#include "hardware/structs/io_bank0.h"
+#include "hardware/structs/systick.h"
+#include "hardware/sync.h"
 #include "imu_bus.h"
 #include "pico/time.h"
 
@@ -100,6 +101,13 @@ static imu_window_t window;
 static uint64_t window_time_sum;
 static uint32_t window_count;
 
+#ifndef NDEBUG
+// SysTick as a 24-bit down-counting cycle counter for profiling accumulate().
+#define SYSTICK_MASK       0x00FFFFFFu
+#define SYSTICK_ENABLE_CPU 0x5 // CSR: ENABLE | CLKSOURCE (processor clock)
+static imu_profile_t profile;
+#endif
+
 static void int1_irq_handler(void);
 static void dma_irq_handler(void);
 
@@ -150,6 +158,12 @@ static void bus_init(void) {
     gpio_set_dir(PIN_IMU_INT1, GPIO_IN);
     gpio_pull_down(PIN_IMU_INT1);
 
+#ifndef NDEBUG
+    systick_hw->rvr = SYSTICK_MASK;
+    systick_hw->cvr = 0;
+    systick_hw->csr = SYSTICK_ENABLE_CPU;
+#endif
+
     dma_init();
     gpio_add_raw_irq_handler(PIN_IMU_INT1, int1_irq_handler);
     irq_set_enabled(IO_IRQ_BANK0, true);
@@ -157,8 +171,49 @@ static void bus_init(void) {
     sleep_ms(BOOT_TIME_MS);
 }
 
-static void set_int1_irq(bool enabled) {
-    gpio_set_irq_enabled(PIN_IMU_INT1, GPIO_IRQ_LEVEL_HIGH, enabled);
+// Hot-path helpers: inline so they run from RAM with their callers. The SDK's
+// gpio_set_irq_enabled() and time_us_64() live in flash.
+
+// Same register as gpio_set_irq_enabled(); everything runs on core 0.
+static __force_inline void set_int1_irq(bool enabled) {
+    io_rw_32 *inte = &io_bank0_hw->proc0_irq_ctrl.inte[PIN_IMU_INT1 / 8];
+    uint32_t mask = GPIO_IRQ_LEVEL_HIGH << (4 * (PIN_IMU_INT1 % 8));
+    if (enabled) {
+        hw_set_bits(inte, mask);
+    } else {
+        hw_clear_bits(inte, mask);
+    }
+}
+
+// Same read as timer_time_us_64(): re-read if the high word changed.
+static __force_inline uint64_t now_us(void) {
+    timer_hw_t *timer = PICO_DEFAULT_TIMER_INSTANCE();
+    uint32_t hi = timer->timerawh;
+    uint32_t lo;
+    while (true) {
+        lo = timer->timerawl;
+        uint32_t next_hi = timer->timerawh;
+        if (hi == next_hi) {
+            break;
+        }
+        hi = next_hi;
+    }
+    return ((uint64_t)hi << 32) | lo;
+}
+
+// Explicit stores, no loop: memset (or a zeroing loop at -O3) calls into flash.
+static __force_inline void window_reset(void) {
+    window.gyro_sum[0] = 0;
+    window.gyro_sum[1] = 0;
+    window.gyro_sum[2] = 0;
+    window.accel_sum[0] = 0;
+    window.accel_sum[1] = 0;
+    window.accel_sum[2] = 0;
+    window.time_us = 0;
+    window.temperature = 0;
+    window.sample_missed = false;
+    window_time_sum = 0;
+    window_count = 0;
 }
 
 static imu_model_t probe(void) {
@@ -218,9 +273,7 @@ static void reset_sampling(imu_model_t model) {
     }
     sample_period_us = odr_period_us(gy_odr);
     prev_time_us = 0;
-    memset(&window, 0, sizeof(window));
-    window_time_sum = 0;
-    window_count = 0;
+    window_reset();
     settle_samples = IMU_SETTLE_SAMPLES;
 }
 
@@ -264,16 +317,25 @@ const char *imu_model_name(imu_model_t model) {
     return "none";
 }
 
+#ifndef NDEBUG
+void imu_profile_take(imu_profile_t *out) {
+    uint32_t irq = save_and_disable_interrupts();
+    *out = profile;
+    profile = (imu_profile_t){0};
+    restore_interrupts(irq);
+}
+#endif
+
 uint32_t imu_window_period_us(void) {
     return odr_period_us(IMU_GY_ODR) * IMU_AVERAGE_N;
 }
 
-static int16_t le16(const uint8_t *b) {
+static __force_inline int16_t le16(const uint8_t *b) {
     return (int16_t)(b[0] | (b[1] << 8));
 }
 
 // Average by count: exactly IMU_AVERAGE_N consecutive samples per window, none dropped.
-static void accumulate(uint64_t t, const uint8_t *b) {
+static void __not_in_flash_func(accumulate)(uint64_t t, const uint8_t *b) {
     bool gap = prev_time_us != 0 && (t - prev_time_us) > sample_period_us * 3 / 2;
     prev_time_us = t;
     if (settle_samples > 0) {
@@ -292,19 +354,17 @@ static void accumulate(uint64_t t, const uint8_t *b) {
     if (++window_count == IMU_AVERAGE_N) {
         window.time_us = window_time_sum / IMU_AVERAGE_N;
         window_cb(&window);
-        memset(&window, 0, sizeof(window));
-        window_time_sum = 0;
-        window_count = 0;
+        window_reset();
     }
 }
 
 // INT1 is a latched level that stays high until the outputs are read; the LSM6DS3 has no
 // pulsed DRDY mode. Level triggering re-fires after a late read, where an edge would stall.
-static void int1_irq_handler(void) {
+static void __not_in_flash_func(int1_irq_handler)(void) {
     if (!(gpio_get_irq_event_mask(PIN_IMU_INT1) & GPIO_IRQ_LEVEL_HIGH)) {
         return;
     }
-    sample_time_us = time_us_64();
+    sample_time_us = now_us();
     set_int1_irq(false);
     xfer_busy = true;
 
@@ -317,14 +377,25 @@ static void int1_irq_handler(void) {
 }
 
 // RX completion means every byte has been clocked, so CS can be released.
-static void dma_irq_handler(void) {
+static void __not_in_flash_func(dma_irq_handler)(void) {
     if (!dma_channel_get_irq0_status(dma_rx)) {
         return;
     }
     dma_channel_acknowledge_irq0(dma_rx);
     gpio_put(PIN_IMU_CS, 1);
 
+#ifndef NDEBUG
+    uint32_t start = systick_hw->cvr;
+#endif
     accumulate(sample_time_us, &rx_burst[1]);
+#ifndef NDEBUG
+    uint32_t cycles = (start - systick_hw->cvr) & SYSTICK_MASK;
+    profile.calls++;
+    profile.total_cycles += cycles;
+    if (cycles > profile.max_cycles) {
+        profile.max_cycles = cycles;
+    }
+#endif
     xfer_busy = false;
     set_int1_irq(true);
 }

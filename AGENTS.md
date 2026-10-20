@@ -17,6 +17,10 @@ Rules for working in this repo. See `docs/requirements.md` for what the firmware
   every 1 ms (`bInterval` 1).
 - Timestamps come from the Pico clock (`time_us_64()`), never the sensor.
 - Sampling never waits on USB: one pending report, replaced (with the USB-busy flag) if unsent.
+- The sampling path (IRQ handlers and everything they call) runs from RAM and must not call
+  into flash: no SDK calls that are not inline, no struct copies/initialisers or copy loops that
+  compile to `memcpy`/`memset`. Check with `arm-none-eabi-objdump -d` that every call from a
+  `__not_in_flash_func` function targets a 0x2000xxxx address.
 
 ## Hardware (fixed)
 

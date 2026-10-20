@@ -81,4 +81,16 @@ const char *imu_model_name(imu_model_t model);
 // Nominal time per window for the configured gyro ODR.
 uint32_t imu_window_period_us(void);
 
+#ifndef NDEBUG
+// CPU cycles spent in sample accumulation (incl. building reports), Debug builds only.
+typedef struct {
+    uint32_t calls;
+    uint32_t total_cycles;
+    uint32_t max_cycles;
+} imu_profile_t;
+
+// Copies and resets the counters.
+void imu_profile_take(imu_profile_t *out);
+#endif
+
 #endif

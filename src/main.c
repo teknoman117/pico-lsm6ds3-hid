@@ -2,6 +2,7 @@
 
 #include "config.h"
 #include "debug.h"
+#include "hardware/clocks.h"
 #include "imu.h"
 #include "pico/stdlib.h"
 #include "report.h"
@@ -10,6 +11,7 @@
 #include "usb_descriptors.h"
 
 #define IMU_RETRY_MS 1000
+#define PROFILE_PERIOD_MS 1000
 
 static status_t current_status(bool imu_ok) {
     if (!imu_ok) {
@@ -20,6 +22,19 @@ static status_t current_status(bool imu_ok) {
     }
     return tud_mounted() ? STATUS_STREAMING : STATUS_USB_WAIT;
 }
+
+#ifndef NDEBUG
+static void print_profile(void) {
+    imu_profile_t p;
+    imu_profile_take(&p);
+    uint32_t cycles_per_us = clock_get_hz(clk_sys) / 1000000;
+    uint32_t total_us = p.total_cycles / cycles_per_us;
+    DBG("filter: %lu calls, %lu us/s (%lu.%lu%% CPU), avg %lu cycles, max %lu cycles\n",
+        (unsigned long)p.calls, (unsigned long)total_us, (unsigned long)(total_us / 10000),
+        (unsigned long)(total_us / 1000 % 10), (unsigned long)(p.calls ? p.total_cycles / p.calls : 0),
+        (unsigned long)p.max_cycles);
+}
+#endif
 
 // Re-enumerate if the detected sensor differs from the advertised product name.
 static void update_product_name(imu_model_t model) {
@@ -50,6 +65,9 @@ int main(void) {
 
     absolute_time_t next_retry = make_timeout_time_ms(IMU_RETRY_MS);
     absolute_time_t next_error_report = get_absolute_time();
+#ifndef NDEBUG
+    absolute_time_t next_profile = make_timeout_time_ms(PROFILE_PERIOD_MS);
+#endif
 
     while (true) {
         tud_task();
@@ -71,5 +89,12 @@ int main(void) {
 
         report_task();
         status_led_set(current_status(model != IMU_MODEL_NONE));
+
+#ifndef NDEBUG
+        if (time_reached(next_profile)) {
+            print_profile();
+            next_profile = delayed_by_ms(next_profile, PROFILE_PERIOD_MS);
+        }
+#endif
     }
 }
