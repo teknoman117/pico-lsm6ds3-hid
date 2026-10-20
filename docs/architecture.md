@@ -20,6 +20,7 @@ report per window (~208 Hz). Requirements: `docs/requirements.md`. Bare-metal, c
 | `src/status_led.[ch]`, `src/ws2812.pio` | NeoPixel status via PIO. |
 | `src/debug.h` | `DBG()` printf macro, compiled out when `NDEBUG` is defined. |
 | `docs/TODO.md` | Open work: raw capture mode for requirements step 5. |
+| `udev/70-pico-lsm6ds3.rules` | Installable udev rule: hidraw access for group `input` and the seat user. |
 | `tools/verify_evdev.py` | Requirements section 7 steps 1-2 against the live device. |
 | `tools/uhid_check.py` | Host-side check of the HID mapping via `/dev/uhid`, no hardware needed. |
 | `lib/lsm6ds3-pid/`, `lib/lsm6ds3tr-c-pid/` | ST's platform-independent drivers, vendored unmodified. See each `UPSTREAM.md`. |

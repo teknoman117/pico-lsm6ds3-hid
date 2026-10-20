@@ -99,13 +99,16 @@ with open("/dev/hidraw0", "rb", buffering=0) as f:
         gx, gy, gz, ax, ay, az, ts, seq, temp, flags = REPORT.unpack(f.read(REPORT.size))
 ```
 
-hidraw access for your user (udev rule, e.g. `/etc/udev/rules.d/70-lsm6ds3.rules`):
+hidraw is root-only by default. `udev/70-pico-lsm6ds3.rules` gives it to group `input` (which
+also owns the evdev node) and to the logged-in desktop user:
 
-```
-KERNEL=="hidraw*", ATTRS{idVendor}=="2e8a", ATTRS{idProduct}=="000a", TAG+="uaccess"
+```sh
+sudo install -m 644 udev/70-pico-lsm6ds3.rules /etc/udev/rules.d/
+sudo udevadm control --reload && sudo udevadm trigger
 ```
 
-(`0009` instead of `000a` on a Pico 2.)
+It matches the Pico VID/PID and the product string, so other Pico firmware using the same IDs is
+not affected. Services such as the ROS node need their user in group `input`.
 
 ## Verification
 

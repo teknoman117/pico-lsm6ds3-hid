@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: MPL-2.0
+#
+# hidraw access to the pico-lsm6ds3 IMU without root.
+# Install: sudo install -m 644 udev/70-pico-lsm6ds3.rules /etc/udev/rules.d/
+#          sudo udevadm control --reload && sudo udevadm trigger
+#
+# 2E8A:000A (RP2040) and 2E8A:0009 (RP2350) are shared with other Pico firmware, so the
+# product string is matched too ("LSM6DS3" or "LSM6DS3TR-C").
+# uaccess: the logged-in desktop user. Group "input": services and headless users; it also
+# owns /dev/input/event*. Must sort before 73-seat-late.rules for uaccess to apply.
+
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="2e8a", ATTRS{idProduct}=="000a|0009", ATTRS{product}=="LSM6DS3*", MODE="0660", GROUP="input", TAG+="uaccess"
